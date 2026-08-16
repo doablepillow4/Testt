@@ -1,6 +1,6 @@
-# [Project name]
+# SolBubble
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+SolBubble is a fast Solana memecoin research tool that combines DexScreener market context with Helius on-chain intelligence.
 
 ## Run & Operate
 
@@ -22,23 +22,34 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/solbubble/src/` — responsive React interface for search, token intelligence, and wallet profiles
+- `artifacts/api-server/src/routes/intelligence.ts` — validated API routes for token and wallet research
+- `artifacts/api-server/src/lib/solana-intel.ts` — DexScreener and Helius provider adapters
+- `lib/api-spec/openapi.yaml` — source of truth for the typed API contract
+- `lib/api-client-react/src/generated/` and `lib/api-zod/src/generated/` — generated client hooks and response schemas
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Market search and token metadata come from DexScreener's public API.
+- Holder, early buyer, and wallet enrichment runs server-side through Helius so the API key never reaches the browser.
+- The app uses the shared Express API server and the workspace's OpenAPI-first code generation rather than direct browser calls to third-party APIs.
+- When a provider cannot return a data set, the UI shows an explicit error or empty state instead of inventing trust-critical data.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Search Solana tokens by name, symbol, or mint.
+- Inspect live market stats, pair context, approximate token age, social links, and a 24-hour pulse.
+- Compare top holders, concentration risk, and earliest detected buyers.
+- Open any wallet to inspect holdings, recent activity, and wallet-age cues.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep the product dark, clean, modern, readable, responsive, and focused on a free DexScreener + Helius stack.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- `HELIUS_API_KEY` is required for holders, early buyers, and wallet profiles; DexScreener search and market pages work independently.
+- Run `pnpm --filter @workspace/api-spec run codegen` after any OpenAPI change, then run the relevant workspace typecheck.
 
 ## Pointers
 

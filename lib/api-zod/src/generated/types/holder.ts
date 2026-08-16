@@ -6,6 +6,11 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface Holder {
+  rank: number;
+  address: string;
+  amount: number;
+  percentage: number;
+  /** @nullable */
+  tokenAccount?: string | null;
 }

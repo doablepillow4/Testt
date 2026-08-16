@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "SolBubble"
+description = "A fast, high-signal Solana memecoin research tool for searching tokens, understanding holder concentration, finding early buyers, and inspecting wallet activity."
+version = "1.0.0"
+id = "artifacts/solbubble"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21146
+
+[services.development]
+run = "pnpm --filter @workspace/solbubble run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/solbubble", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/solbubble/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21146"
+BASE_PATH = "/"

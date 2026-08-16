@@ -3,13 +3,17 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: SolBubble market and on-chain intelligence API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: tokens
+    description: Solana token discovery and intelligence
+  - name: wallets
+    description: Wallet holdings and activity
 paths:
   /healthz:
     get:
@@ -24,7 +28,101 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /tokens/search:
+    get:
+      operationId: searchTokens
+      tags: [tokens]
+      summary: Search Solana tokens and pairs
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Matching token markets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TokenSearchResult"
+        "400":
+          description: Invalid search
+  /tokens/{mint}:
+    get:
+      operationId: getToken
+      tags: [tokens]
+      summary: Get market and metadata for a token
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Token detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenDetail"
+        "404":
+          description: Token not found
+  /tokens/{mint}/holders:
+    get:
+      operationId: getTokenHolders
+      tags: [tokens]
+      summary: Get the largest token holders
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Holder concentration data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HoldersResponse"
+  /tokens/{mint}/buyers:
+    get:
+      operationId: getTokenEarlyBuyers
+      tags: [tokens]
+      summary: Get wallets that first acquired a token
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Earliest detected buyers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EarlyBuyersResponse"
+  /wallets/{address}:
+    get:
+      operationId: getWalletProfile
+      tags: [wallets]
+      summary: Get holdings and recent activity for a wallet
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        "200":
+          description: Wallet profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletProfile"
 components:
+  parameters:
+    Mint:
+      name: mint
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 32
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +131,129 @@ components:
           type: string
       required:
         - status
+    TokenSearchResult:
+      type: object
+      required: [mint, name, symbol, priceUsd, liquidityUsd, volume24hUsd, change24h, marketCap, fdv, dexId, pairAddress, url]
+      properties:
+        mint: { type: string }
+        name: { type: string }
+        symbol: { type: string }
+        imageUrl: { type: ["string", "null"] }
+        priceUsd: { type: ["number", "null"] }
+        liquidityUsd: { type: ["number", "null"] }
+        volume24hUsd: { type: ["number", "null"] }
+        change24h: { type: ["number", "null"] }
+        marketCap: { type: ["number", "null"] }
+        fdv: { type: ["number", "null"] }
+        dexId: { type: string }
+        pairAddress: { type: string }
+        url: { type: string }
+    TokenDetail:
+      type: object
+      required: [mint, name, symbol, priceUsd, liquidityUsd, volume24hUsd, change24h, marketCap, fdv, dexId, pairAddress, url, ageSeconds, launchTimestamp]
+      properties:
+        mint: { type: string }
+        name: { type: string }
+        symbol: { type: string }
+        imageUrl: { type: ["string", "null"] }
+        priceUsd: { type: ["number", "null"] }
+        liquidityUsd: { type: ["number", "null"] }
+        volume24hUsd: { type: ["number", "null"] }
+        change24h: { type: ["number", "null"] }
+        marketCap: { type: ["number", "null"] }
+        fdv: { type: ["number", "null"] }
+        dexId: { type: string }
+        pairAddress: { type: string }
+        url: { type: string }
+        ageSeconds: { type: ["number", "null"] }
+        launchTimestamp: { type: ["string", "null"], format: date-time }
+        website: { type: ["string", "null"] }
+        twitter: { type: ["string", "null"] }
+        telegram: { type: ["string", "null"] }
+        chart: 
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartPoint"
+    ChartPoint:
+      type: object
+      required: [timestamp, price]
+      properties:
+        timestamp: { type: number }
+        price: { type: number }
+    Holder:
+      type: object
+      required: [rank, address, amount, percentage]
+      properties:
+        rank: { type: number }
+        address: { type: string }
+        amount: { type: number }
+        percentage: { type: number }
+        tokenAccount: { type: ["string", "null"] }
+    HoldersResponse:
+      type: object
+      required: [holders, top10Concentration, totalSupply, decimals, fetchedAt]
+      properties:
+        holders:
+          type: array
+          items:
+            $ref: "#/components/schemas/Holder"
+        top10Concentration: { type: number }
+        totalSupply: { type: number }
+        decimals: { type: number }
+        fetchedAt: { type: string, format: date-time }
+    EarlyBuyer:
+      type: object
+      required: [position, address, approximateTimeAfterLaunch, timestamp]
+      properties:
+        position: { type: number }
+        address: { type: string }
+        approximateTimeAfterLaunch: { type: ["string", "null"] }
+        timestamp: { type: ["string", "null"], format: date-time }
+        amountBought: { type: ["number", "null"] }
+    EarlyBuyersResponse:
+      type: object
+      required: [buyers, scannedTransactions, fetchedAt]
+      properties:
+        buyers:
+          type: array
+          items:
+            $ref: "#/components/schemas/EarlyBuyer"
+        scannedTransactions: { type: number }
+        fetchedAt: { type: string, format: date-time }
+    WalletAsset:
+      type: object
+      required: [id, name, symbol, amount, decimals]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        symbol: { type: string }
+        imageUrl: { type: ["string", "null"] }
+        amount: { type: number }
+        decimals: { type: number }
+        valueUsd: { type: ["number", "null"] }
+    WalletActivity:
+      type: object
+      required: [signature, timestamp, type, description]
+      properties:
+        signature: { type: string }
+        timestamp: { type: ["string", "null"], format: date-time }
+        type: { type: string }
+        description: { type: string }
+        source: { type: ["string", "null"] }
+    WalletProfile:
+      type: object
+      required: [address, assets, activity, tokenCount, walletAge, fetchedAt]
+      properties:
+        address: { type: string }
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/WalletAsset"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/WalletActivity"
+        tokenCount: { type: number }
+        walletAge: { type: ["string", "null"] }
+        fetchedAt: { type: string, format: date-time }
 
