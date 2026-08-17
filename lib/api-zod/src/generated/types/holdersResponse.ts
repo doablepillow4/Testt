@@ -10,7 +10,9 @@ import type { Holder } from './holder';
 export interface HoldersResponse {
   holders: Holder[];
   top10Concentration: number;
+  top20Concentration: number;
   totalSupply: number;
   decimals: number;
+  holderCount: number;
   fetchedAt: Date;
 }

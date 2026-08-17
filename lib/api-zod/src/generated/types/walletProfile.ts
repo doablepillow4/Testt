@@ -15,5 +15,7 @@ export interface WalletProfile {
   tokenCount: number;
   /** @nullable */
   walletAge: string | null;
+  /** @nullable */
+  firstSeen: Date | null;
   fetchedAt: Date;
 }

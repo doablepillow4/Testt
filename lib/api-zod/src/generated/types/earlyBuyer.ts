@@ -5,6 +5,7 @@
  * SolBubble market and on-chain intelligence API
  * OpenAPI spec version: 0.1.0
  */
+import type { EarlyBuyerHoldingStatus } from './earlyBuyerHoldingStatus';
 
 export interface EarlyBuyer {
   position: number;
@@ -14,5 +15,10 @@ export interface EarlyBuyer {
   /** @nullable */
   timestamp: Date | null;
   /** @nullable */
-  amountBought?: number | null;
+  amountBought: number | null;
+  /** @nullable */
+  amountSolSpent: number | null;
+  /** @nullable */
+  currentBalance: number | null;
+  holdingStatus: EarlyBuyerHoldingStatus;
 }

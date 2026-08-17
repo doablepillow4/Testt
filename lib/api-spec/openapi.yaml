@@ -191,25 +191,32 @@ components:
         tokenAccount: { type: ["string", "null"] }
     HoldersResponse:
       type: object
-      required: [holders, top10Concentration, totalSupply, decimals, fetchedAt]
+      required: [holders, top10Concentration, top20Concentration, totalSupply, decimals, holderCount, fetchedAt]
       properties:
         holders:
           type: array
           items:
             $ref: "#/components/schemas/Holder"
         top10Concentration: { type: number }
+        top20Concentration: { type: number }
         totalSupply: { type: number }
         decimals: { type: number }
+        holderCount: { type: number }
         fetchedAt: { type: string, format: date-time }
     EarlyBuyer:
       type: object
-      required: [position, address, approximateTimeAfterLaunch, timestamp]
+      required: [position, address, approximateTimeAfterLaunch, timestamp, amountBought, amountSolSpent, currentBalance, holdingStatus]
       properties:
         position: { type: number }
         address: { type: string }
         approximateTimeAfterLaunch: { type: ["string", "null"] }
         timestamp: { type: ["string", "null"], format: date-time }
         amountBought: { type: ["number", "null"] }
+        amountSolSpent: { type: ["number", "null"] }
+        currentBalance: { type: ["number", "null"] }
+        holdingStatus:
+          type: string
+          enum: [holding, sold, unknown]
     EarlyBuyersResponse:
       type: object
       required: [buyers, scannedTransactions, fetchedAt]
@@ -242,7 +249,7 @@ components:
         source: { type: ["string", "null"] }
     WalletProfile:
       type: object
-      required: [address, assets, activity, tokenCount, walletAge, fetchedAt]
+      required: [address, assets, activity, tokenCount, walletAge, firstSeen, fetchedAt]
       properties:
         address: { type: string }
         assets:
@@ -255,5 +262,6 @@ components:
             $ref: "#/components/schemas/WalletActivity"
         tokenCount: { type: number }
         walletAge: { type: ["string", "null"] }
+        firstSeen: { type: ["string", "null"], format: date-time }
         fetchedAt: { type: string, format: date-time }
 

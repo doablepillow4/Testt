@@ -168,6 +168,31 @@ type TokenAccount = {
 
 type TokenAccountsResult = {
   token_accounts?: TokenAccount[];
+  total?: number;
+};
+
+type LargestTokenAccount = {
+  address?: string;
+  amount?: string;
+  decimals?: number;
+  uiAmount?: number | null;
+};
+
+type LargestTokenAccountsResult = {
+  value?: LargestTokenAccount[];
+};
+
+type ParsedAccountResult = {
+  value?: {
+    data?: {
+      parsed?: {
+        info?: {
+          owner?: string;
+          tokenAmount?: { amount?: string; decimals?: number };
+        };
+      };
+    };
+  }[];
 };
 
 type AssetResult = {
@@ -175,7 +200,7 @@ type AssetResult = {
 };
 
 export async function getHolders(mint: string) {
-  const [accounts, asset] = await Promise.all([
+  const [accounts, asset, largestAccounts] = await Promise.all([
     heliusRpc<TokenAccountsResult>("getTokenAccounts", {
       mint,
       page: 1,
@@ -183,16 +208,39 @@ export async function getHolders(mint: string) {
       options: { showZeroBalance: false },
     }),
     heliusRpc<AssetResult>("getAsset", { id: mint }),
+    heliusRpc<LargestTokenAccountsResult>("getTokenLargestAccounts", [mint]),
   ]);
 
   const decimals = asset.token_info?.decimals ?? accounts.token_accounts?.[0]?.decimals ?? 0;
   const supplyRaw = Number(asset.token_info?.supply ?? 0);
   const totalSupply = supplyRaw > 0 ? supplyRaw / 10 ** decimals : 0;
-  const holders = (accounts.token_accounts ?? [])
+  const largest = (largestAccounts.value ?? []).filter((account) => account.address);
+  const largestOwners = largest.length
+    ? await heliusRpc<ParsedAccountResult>("getMultipleAccounts", [
+        largest.map((account) => account.address),
+        { encoding: "jsonParsed" },
+      ])
+    : { value: [] };
+  const largestHolders = largest.map((account, index) => ({
+    address: largestOwners.value?.[index]?.data?.parsed?.info?.owner ?? "",
+    amount: typeof account.uiAmount === "number"
+      ? account.uiAmount
+      : Number(account.amount ?? 0) / 10 ** (account.decimals ?? decimals),
+    tokenAccount: account.address ?? null,
+  }));
+  const largestAddresses = new Set(largestHolders.map((holder) => holder.tokenAccount));
+  const additionalHolders = (accounts.token_accounts ?? [])
+    .filter((account) => !largestAddresses.has(account.address ?? null))
     .map((account) => ({
       address: account.owner ?? "",
-      amount: Number(account.amount ?? 0) / 10 ** decimals,
+      amount: Number(account.amount ?? 0) / 10 ** (account.decimals ?? decimals),
       tokenAccount: account.address ?? null,
+    }));
+  const holders = [...largestHolders, ...additionalHolders]
+    .map((account) => ({
+      address: account.address,
+      amount: account.amount,
+      tokenAccount: account.tokenAccount,
     }))
     .filter((holder) => holder.address && holder.amount > 0)
     .sort((left, right) => right.amount - left.amount)
@@ -207,8 +255,10 @@ export async function getHolders(mint: string) {
   return {
     holders: ranked,
     top10Concentration: ranked.slice(0, 10).reduce((sum, holder) => sum + holder.percentage, 0),
+    top20Concentration: ranked.slice(0, 20).reduce((sum, holder) => sum + holder.percentage, 0),
     totalSupply: denominator,
     decimals,
+    holderCount: accounts.total ?? (accounts.token_accounts ?? []).length,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -216,7 +266,15 @@ export async function getHolders(mint: string) {
 type SignatureInfo = { signature?: string; blockTime?: number | null };
 type TransactionResult = {
   blockTime?: number | null;
+  transaction?: {
+    message?: {
+      accountKeys?: { pubkey?: string; signer?: boolean }[];
+    };
+  };
   meta?: {
+    fee?: number;
+    preBalances?: number[];
+    postBalances?: number[];
     postTokenBalances?: {
       accountIndex?: number;
       mint?: string;
@@ -233,12 +291,19 @@ type TransactionResult = {
 };
 
 export async function getEarlyBuyers(mint: string) {
-  const signatures = await heliusRpc<SignatureInfo[]>("getSignaturesForAddress", [
-    mint,
-    { limit: 100 },
+  const [signatures, holderSnapshot] = await Promise.all([
+    heliusRpc<SignatureInfo[]>("getSignaturesForAddress", [
+      mint,
+      { limit: 100 },
+    ]),
+    getHolders(mint),
   ]);
+  const tokenDetail = await getDexToken(mint).catch(() => null);
   const orderedSignatures = [...(signatures ?? [])].reverse().slice(0, 80);
-  const buyers = new Map<string, { timestamp: number | null; amount: number }>();
+  const buyers = new Map<
+    string,
+    { timestamp: number | null; amount: number; amountSolSpent: number | null }
+  >();
 
   for (let index = 0; index < orderedSignatures.length; index += 10) {
     const chunk = orderedSignatures.slice(index, index + 10);
@@ -266,17 +331,32 @@ export async function getEarlyBuyers(mint: string) {
         if (delta > 0 && post.owner) {
           const existing = buyers.get(post.owner);
           if (!existing || (transaction.blockTime ?? Infinity) < (existing.timestamp ?? Infinity)) {
-            buyers.set(post.owner, { timestamp: transaction.blockTime ?? null, amount: delta });
+            buyers.set(post.owner, {
+              timestamp: transaction.blockTime ?? null,
+              amount: delta,
+              amountSolSpent: estimateSolSpent(transaction, post.owner),
+            });
           }
         }
       }
     }
   }
 
-  const firstTimestamp = [...buyers.values()]
+  const launchTimestamp = tokenDetail?.launchTimestamp
+    ? Math.floor(new Date(tokenDetail.launchTimestamp).getTime() / 1000)
+    : null;
+  const firstBuyerTimestamp = [...buyers.values()]
     .map((buyer) => buyer.timestamp)
     .filter((timestamp): timestamp is number => typeof timestamp === "number")
     .sort((left, right) => left - right)[0];
+  const firstTimestamp =
+    launchTimestamp !== null &&
+    firstBuyerTimestamp !== undefined &&
+    firstBuyerTimestamp >= launchTimestamp &&
+    firstBuyerTimestamp - launchTimestamp < 14 * 86_400
+      ? launchTimestamp
+      : firstBuyerTimestamp;
+  const buyerBalances = await getBuyerBalances(mint, [...buyers.keys()]);
 
   return {
     buyers: [...buyers.entries()]
@@ -286,22 +366,80 @@ export async function getEarlyBuyers(mint: string) {
         position: index + 1,
         address,
         approximateTimeAfterLaunch:
-          firstTimestamp && buyer.timestamp
+          firstTimestamp !== null && firstTimestamp !== undefined && buyer.timestamp
             ? formatElapsedTime(buyer.timestamp - firstTimestamp)
             : null,
         timestamp: buyer.timestamp ? new Date(buyer.timestamp * 1000).toISOString() : null,
         amountBought: buyer.amount || null,
+        amountSolSpent: buyer.amountSolSpent,
+        currentBalance: buyerBalances.get(address) ?? null,
+        holdingStatus: buyerBalances.has(address)
+          ? buyerBalances.get(address)! > 0
+            ? "holding"
+            : "sold"
+          : "unknown",
       })),
     scannedTransactions: orderedSignatures.length,
     fetchedAt: new Date().toISOString(),
   };
 }
 
+async function getBuyerBalances(mint: string, addresses: string[]) {
+  const balances = new Map<string, number>();
+  for (let index = 0; index < addresses.length; index += 10) {
+    const chunk = addresses.slice(index, index + 10);
+    const results = await Promise.all(
+      chunk.map(async (address) => {
+        try {
+          const result = await heliusRpc<TokenAccountsResult>("getTokenAccounts", {
+            mint,
+            owner: address,
+            page: 1,
+            limit: 10,
+            options: { showZeroBalance: false },
+          });
+          const decimals = result.token_accounts?.[0]?.decimals ?? 0;
+          const balance = (result.token_accounts ?? []).reduce(
+            (sum, account) => sum + Number(account.amount ?? 0) / 10 ** decimals,
+            0,
+          );
+          return [address, balance] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const result of results) {
+      if (result) balances.set(result[0], result[1]);
+    }
+  }
+  return balances;
+}
+
 function formatElapsedTime(seconds: number) {
-  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
-  return `${Math.round(seconds / 86400)}d`;
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  if (totalSeconds < 60) return `+${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainder = totalSeconds % 60;
+  if (minutes < 60) return `+${minutes}m${remainder ? ` ${remainder}s` : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `+${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ""}`;
+  return `+${Math.floor(hours / 24)}d`;
+}
+
+function estimateSolSpent(transaction: TransactionResult, buyer: string) {
+  const accountKeys = transaction.transaction?.message?.accountKeys ?? [];
+  const buyerIndex = accountKeys.findIndex(
+    (account) => account.pubkey === buyer && account.signer,
+  );
+  if (buyerIndex < 0) return null;
+  const pre = transaction.meta?.preBalances?.[buyerIndex];
+  const post = transaction.meta?.postBalances?.[buyerIndex];
+  if (pre === undefined || post === undefined) return null;
+  const fee = transaction.meta?.fee ?? 0;
+  const spent = (pre - post - fee) / 1_000_000_000;
+  return spent > 0 ? spent : null;
 }
 
 type DasAsset = {
@@ -373,6 +511,7 @@ export async function getWalletProfile(address: string) {
     })),
     tokenCount: normalizedAssets.length,
     walletAge: oldest ? formatAge(Date.now() / 1000 - oldest) : null,
+    firstSeen: oldest ? new Date(oldest * 1000).toISOString() : null,
     fetchedAt: new Date().toISOString(),
   };
 }

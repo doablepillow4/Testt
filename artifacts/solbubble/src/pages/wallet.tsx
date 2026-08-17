@@ -11,11 +11,16 @@ function formatActivityDate(value: string | null) {
   return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-function walletAge(value: string | null) {
-  if (!value) return 'Age unavailable';
+function firstSeenLabel(value: string | null) {
+  if (!value) return 'First seen unavailable';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  const days = Math.max(1, Math.floor((Date.now() - date.getTime()) / 86_400_000));
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function walletAge(value: string | null) {
+  if (!value) return 'Age unavailable';
+  const days = Math.max(1, Math.floor((Date.now() - new Date(value).getTime()) / 86_400_000));
   if (days < 30) return `${days} days`;
   if (days < 365) return `${Math.floor(days / 30)} months`;
   return `${(days / 365).toFixed(1)} years`;
@@ -56,7 +61,7 @@ export default function WalletPage() {
               <div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl border border-accent/25 bg-accent/10 text-accent"><WalletCards className="h-6 w-6" /></div>
               <div className="min-w-0">
                 <p className="mb-1 font-mono text-[9px] uppercase tracking-[.2em] text-primary">Wallet profile</p>
-                <h1 className="truncate font-mono text-base font-medium text-foreground sm:text-lg">{shortValue(profile.address)}</h1>
+                 <h1 className="break-all font-mono text-sm font-medium leading-6 text-foreground sm:text-base">{profile.address}</h1>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <button type="button" onClick={copyAddress} data-testid="button-copy-wallet" className="flex items-center gap-1.5 rounded-md border border-border bg-secondary/60 px-2 py-1 font-mono text-[10px] text-secondary-foreground hover:border-primary/50 hover:text-primary">{copied ? <CheckCircle2 className="h-3 w-3 text-primary" /> : <Copy className="h-3 w-3" />} {copied ? 'Copied' : 'Copy address'}</button>
                   <CopyButton value={profile.address} label="Copy raw" />
@@ -68,7 +73,8 @@ export default function WalletPage() {
           <div className="mt-7 grid gap-3 border-t border-border pt-5 sm:grid-cols-3">
             <div><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">Tracked value</p><p className="mt-1 text-lg font-extrabold tracking-[-.04em] text-foreground">{formatUsd(totalValue)}</p></div>
             <div><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">Token accounts</p><p className="mt-1 text-lg font-extrabold tracking-[-.04em] text-foreground">{profile.tokenCount.toLocaleString()}</p></div>
-            <div><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">Wallet age</p><p className="mt-1 text-lg font-extrabold tracking-[-.04em] text-foreground">{walletAge(profile.walletAge)}</p></div>
+             <div><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">Wallet age</p><p className="mt-1 text-lg font-extrabold tracking-[-.04em] text-foreground">{walletAge(profile.firstSeen)}</p></div>
+             <div><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">First seen</p><p className="mt-1 text-lg font-extrabold tracking-[-.04em] text-foreground">{firstSeenLabel(profile.firstSeen)}</p></div>
           </div>
         </div>
 

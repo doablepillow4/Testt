@@ -8,6 +8,7 @@
 
 export * from './chartPoint';
 export * from './earlyBuyer';
+export * from './earlyBuyerHoldingStatus';
 export * from './earlyBuyersResponse';
 export * from './healthStatus';
 export * from './holder';

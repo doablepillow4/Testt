@@ -1,4 +1,4 @@
-import { ArrowUpRight, Check, Copy, Globe, MessageCircle, Share2, Twitter, Users, WalletCards } from 'lucide-react';
+import { ArrowUpRight, Check, CircleAlert, Copy, Globe, MessageCircle, Share2, Twitter, Users, WalletCards } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'wouter';
 import { getGetTokenEarlyBuyersQueryKey, getGetTokenHoldersQueryKey, getGetTokenQueryKey, useGetToken, useGetTokenEarlyBuyers, useGetTokenHolders } from '@workspace/api-client-react';
@@ -16,6 +16,26 @@ function formatDate(value: string | null | undefined) {
   if (!value) return '—';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function holderRisk(concentration: number) {
+  if (concentration >= 50) return { label: 'Extreme', tone: 'negative' as const, detail: 'A small group can move this market.' };
+  if (concentration >= 35) return { label: 'High', tone: 'negative' as const, detail: 'Concentration is meaningfully elevated.' };
+  if (concentration >= 20) return { label: 'Medium', tone: 'normal' as const, detail: 'Monitor large-wallet activity closely.' };
+  return { label: 'Low', tone: 'positive' as const, detail: 'Supply is relatively distributed.' };
+}
+
+function statusLabel(status: 'holding' | 'sold' | 'unknown') {
+  if (status === 'holding') return { label: 'Holding', className: 'border-primary/25 bg-primary/10 text-primary' };
+  if (status === 'sold') return { label: 'Sold', className: 'border-destructive/25 bg-destructive/10 text-destructive' };
+  return { label: 'Not tracked', className: 'border-border bg-secondary text-muted-foreground' };
+}
+
+function formatTokenAmount(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function PulseChart({ points }: { points: { timestamp: number; price: number }[] }) {
@@ -58,6 +78,7 @@ export default function TokenPage() {
   const holdersQuery = useGetTokenHolders(mint, { query: { enabled: Boolean(mint), queryKey: getGetTokenHoldersQueryKey(mint), staleTime: 60_000 } });
   const buyersQuery = useGetTokenEarlyBuyers(mint, { query: { enabled: Boolean(mint), queryKey: getGetTokenEarlyBuyersQueryKey(mint), staleTime: 60_000 } });
   const [shared, setShared] = useState(false);
+  const [buyerLimit, setBuyerLimit] = useState<20 | 50>(20);
   const token = tokenQuery.data;
   const chart = useMemo(() => token?.chart ?? [], [token?.chart]);
 
@@ -154,20 +175,47 @@ export default function TokenPage() {
             <SectionLabel eyebrow="Supply map" title="Holder concentration" detail={holdersQuery.data ? `Fetched ${formatDate(holdersQuery.data.fetchedAt)}` : undefined} />
             {holdersQuery.isLoading ? <LoadingRows count={5} /> : holdersQuery.isError || !holdersQuery.data ? <QueryError onRetry={() => holdersQuery.refetch()} /> : (
               <>
+                {(() => {
+                  const risk = holderRisk(holdersQuery.data.top20Concentration);
+                  return (
+                    <div className="mb-4 rounded-2xl border border-border bg-card/60 p-4 sm:p-5">
+                      <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div>
+                          <p className="font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">Holder risk</p>
+                          <div className="mt-2 flex items-center gap-3">
+                            <span className={`rounded-md border px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-[.12em] ${risk.tone === 'negative' ? 'border-destructive/30 bg-destructive/10 text-destructive' : risk.tone === 'positive' ? 'border-primary/30 bg-primary/10 text-primary' : 'border-accent/30 bg-accent/10 text-accent'}`}>{risk.label}</span>
+                            <span className="text-xs text-muted-foreground">{risk.detail}</span>
+                          </div>
+                        </div>
+                        <CircleAlert className={`h-4 w-4 ${risk.tone === 'negative' ? 'text-destructive' : risk.tone === 'positive' ? 'text-primary' : 'text-accent'}`} />
+                      </div>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+                        <Stat label="Top 10 control" value={`${holdersQuery.data.top10Concentration.toFixed(2)}%`} tone={holdersQuery.data.top10Concentration >= 35 ? 'negative' : 'normal'} />
+                        <Stat label="Top 20 control" value={`${holdersQuery.data.top20Concentration.toFixed(2)}%`} tone={holdersQuery.data.top20Concentration >= 50 ? 'negative' : 'normal'} />
+                        <Stat label="Total holders" value={holdersQuery.data.holderCount.toLocaleString()} />
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <Stat label="Top 10 control" value={`${holdersQuery.data.top10Concentration.toFixed(2)}%`} tone={holdersQuery.data.top10Concentration > 40 ? 'negative' : 'positive'} />
                   <Stat label="Tracked supply" value={holdersQuery.data.totalSupply.toLocaleString()} />
                   <Stat label="Decimals" value={String(holdersQuery.data.decimals)} />
+                  <Stat label="Wallets shown" value={holdersQuery.data.holders.length.toLocaleString()} />
                 </div>
-                <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/60">
-                  <div className="grid grid-cols-[42px_minmax(110px,1fr)_100px_76px] gap-3 border-b border-border bg-secondary/35 px-4 py-3 font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground"><span>#</span><span>Wallet</span><span>Amount</span><span className="text-right">Share</span></div>
-                  <div className="divide-y divide-border">
-                    {holdersQuery.data.holders.slice(0, 10).map((holder) => <div key={holder.address} className="grid grid-cols-[42px_minmax(110px,1fr)_100px_76px] items-center gap-3 px-4 py-3 text-xs">
-                      <span className="font-mono text-muted-foreground">{String(holder.rank).padStart(2, '0')}</span>
-                      <Link href={`/wallet/${holder.address}`} data-testid={`link-holder-wallet-${holder.rank}`} className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-secondary-foreground hover:text-primary"><WalletCards className="h-3 w-3 shrink-0 text-muted-foreground" /> <span className="truncate">{shortValue(holder.address)}</span></Link>
-                      <span className="font-mono text-[10px] text-foreground">{holder.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-                      <span className={`text-right font-mono text-[10px] ${holder.rank <= 3 ? 'text-accent' : 'text-muted-foreground'}`}>{holder.percentage.toFixed(2)}%</span>
-                    </div>)}
+                <div className="mt-4 overflow-x-auto rounded-2xl border border-border bg-card/60">
+                  <div className="min-w-[560px]">
+                    <div className="grid grid-cols-[42px_minmax(180px,1fr)_110px_76px] gap-3 border-b border-border bg-secondary/35 px-4 py-3 font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground"><span>#</span><span>Wallet</span><span>Amount</span><span className="text-right">Share</span></div>
+                    <div className="divide-y divide-border">
+                      {holdersQuery.data.holders.slice(0, 20).map((holder) => <div key={holder.address} className="grid grid-cols-[42px_minmax(180px,1fr)_110px_76px] items-center gap-3 px-4 py-3 text-xs">
+                        <span className="font-mono text-muted-foreground">{String(holder.rank).padStart(2, '0')}</span>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Link href={`/wallet/${holder.address}`} data-testid={`link-holder-wallet-${holder.rank}`} title={holder.address} className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-secondary-foreground hover:text-primary"><WalletCards className="h-3 w-3 shrink-0 text-muted-foreground" /> <span className="truncate">{shortValue(holder.address)}</span></Link>
+                          <CopyButton value={holder.address} label="Copy" />
+                        </div>
+                        <span className="font-mono text-[10px] text-foreground">{formatTokenAmount(holder.amount)}</span>
+                        <span className={`text-right font-mono text-[10px] ${holder.rank <= 3 ? 'text-accent' : 'text-muted-foreground'}`}>{holder.percentage.toFixed(2)}%</span>
+                      </div>)}
+                    </div>
                   </div>
                 </div>
               </>
@@ -177,14 +225,29 @@ export default function TokenPage() {
           <section>
             <SectionLabel eyebrow="First money" title="Early buyers" detail={buyersQuery.data ? `${buyersQuery.data.scannedTransactions.toLocaleString()} tx scanned` : undefined} />
             {buyersQuery.isLoading ? <LoadingRows count={5} /> : buyersQuery.isError || !buyersQuery.data ? <QueryError onRetry={() => buyersQuery.refetch()} /> : buyersQuery.data.buyers.length === 0 ? <EmptyState title="No early buyers found" detail="The scan did not identify a clean first-buyer set for this token." /> : (
-              <div className="overflow-hidden rounded-2xl border border-border bg-card/60">
-                <div className="grid grid-cols-[42px_minmax(110px,1fr)_90px] gap-3 border-b border-border bg-secondary/35 px-4 py-3 font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground"><span>#</span><span>Wallet</span><span className="text-right">Arrived</span></div>
-                <div className="divide-y divide-border">
-                  {buyersQuery.data.buyers.slice(0, 10).map((buyer) => <div key={buyer.address} className="grid grid-cols-[42px_minmax(110px,1fr)_90px] items-center gap-3 px-4 py-3">
-                    <span className="font-mono text-muted-foreground">{String(buyer.position).padStart(2, '0')}</span>
-                    <Link href={`/wallet/${buyer.address}`} data-testid={`link-early-buyer-${buyer.position}`} className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-secondary-foreground hover:text-primary"><Users className="h-3 w-3 shrink-0 text-primary" /><span className="truncate">{shortValue(buyer.address)}</span></Link>
-                    <span className="text-right font-mono text-[10px] text-accent">{buyer.approximateTimeAfterLaunch ?? '—'}</span>
-                  </div>)}
+              <div className="overflow-x-auto rounded-2xl border border-border bg-card/60">
+                <div className="min-w-[760px]">
+                  <div className="flex items-center justify-between border-b border-border bg-secondary/35 px-4 py-3">
+                    <div className="grid flex-1 grid-cols-[42px_minmax(170px,1fr)_100px_92px_110px] gap-3 font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground"><span>#</span><span>Wallet</span><span>Arrived</span><span>Bought</span><span>Status</span></div>
+                    <div className="ml-3 flex shrink-0 items-center gap-1 rounded-md border border-border p-0.5">
+                      {[20, 50].map((limit) => <button key={limit} type="button" onClick={() => setBuyerLimit(limit as 20 | 50)} className={`rounded px-2 py-1 font-mono text-[9px] ${buyerLimit === limit ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}>First {limit}</button>)}
+                    </div>
+                  </div>
+                  <div className="divide-y divide-border">
+                    {[...buyersQuery.data.buyers].sort((left, right) => (left.timestamp ?? '9999').localeCompare(right.timestamp ?? '9999')).slice(0, buyerLimit).map((buyer) => {
+                      const status = statusLabel(buyer.holdingStatus);
+                      return <div key={buyer.address} className="grid grid-cols-[42px_minmax(170px,1fr)_100px_92px_110px] items-center gap-3 px-4 py-3">
+                        <span className="font-mono text-muted-foreground">#{buyer.position}</span>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Link href={`/wallet/${buyer.address}`} data-testid={`link-early-buyer-${buyer.position}`} title={buyer.address} className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-secondary-foreground hover:text-primary"><Users className="h-3 w-3 shrink-0 text-primary" /><span className="truncate">{shortValue(buyer.address)}</span></Link>
+                          <CopyButton value={buyer.address} label="Copy" />
+                        </div>
+                        <span className="font-mono text-[10px] text-accent">{buyer.approximateTimeAfterLaunch ?? '—'}</span>
+                        <div className="font-mono text-[10px] text-foreground"><span>{formatTokenAmount(buyer.amountBought)}</span><span className="mt-0.5 block text-[9px] text-muted-foreground">{buyer.amountSolSpent !== null ? `${buyer.amountSolSpent.toFixed(3)} SOL` : 'SOL n/a'}</span></div>
+                        <span className={`w-fit rounded-md border px-2 py-1 font-mono text-[9px] uppercase tracking-[.08em] ${status.className}`}>{status.label}</span>
+                      </div>;
+                    })}
+                  </div>
                 </div>
               </div>
             )}

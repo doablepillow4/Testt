@@ -102,8 +102,10 @@ export const GetTokenHoldersResponse = zod.object({
   "tokenAccount": zod.string().nullish()
 })),
   "top10Concentration": zod.number(),
+  "top20Concentration": zod.number(),
   "totalSupply": zod.number(),
   "decimals": zod.number(),
+  "holderCount": zod.number(),
   "fetchedAt": zod.coerce.date()
 })
 
@@ -125,7 +127,10 @@ export const GetTokenEarlyBuyersResponse = zod.object({
   "address": zod.string(),
   "approximateTimeAfterLaunch": zod.string().nullable(),
   "timestamp": zod.coerce.date().nullable(),
-  "amountBought": zod.number().nullish()
+  "amountBought": zod.number().nullable(),
+  "amountSolSpent": zod.number().nullable(),
+  "currentBalance": zod.number().nullable(),
+  "holdingStatus": zod.enum(['holding', 'sold', 'unknown'])
 })),
   "scannedTransactions": zod.number(),
   "fetchedAt": zod.coerce.date()
@@ -163,6 +168,7 @@ export const GetWalletProfileResponse = zod.object({
 })),
   "tokenCount": zod.number(),
   "walletAge": zod.string().nullable(),
+  "firstSeen": zod.coerce.date().nullable(),
   "fetchedAt": zod.coerce.date()
 })
 

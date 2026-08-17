@@ -83,10 +83,21 @@ export interface Holder {
 export interface HoldersResponse {
   holders: Holder[];
   top10Concentration: number;
+  top20Concentration: number;
   totalSupply: number;
   decimals: number;
+  holderCount: number;
   fetchedAt: string;
 }
+
+export type EarlyBuyerHoldingStatus = typeof EarlyBuyerHoldingStatus[keyof typeof EarlyBuyerHoldingStatus];
+
+
+export const EarlyBuyerHoldingStatus = {
+  holding: 'holding',
+  sold: 'sold',
+  unknown: 'unknown',
+} as const;
 
 export interface EarlyBuyer {
   position: number;
@@ -96,7 +107,12 @@ export interface EarlyBuyer {
   /** @nullable */
   timestamp: string | null;
   /** @nullable */
-  amountBought?: number | null;
+  amountBought: number | null;
+  /** @nullable */
+  amountSolSpent: number | null;
+  /** @nullable */
+  currentBalance: number | null;
+  holdingStatus: EarlyBuyerHoldingStatus;
 }
 
 export interface EarlyBuyersResponse {
@@ -134,6 +150,8 @@ export interface WalletProfile {
   tokenCount: number;
   /** @nullable */
   walletAge: string | null;
+  /** @nullable */
+  firstSeen: string | null;
   fetchedAt: string;
 }
 
