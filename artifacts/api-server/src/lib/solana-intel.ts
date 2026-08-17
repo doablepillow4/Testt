@@ -162,7 +162,7 @@ export async function getDexToken(mint: string) {
 type TokenAccount = {
   address?: string;
   owner?: string;
-  amount?: number | string;
+  amount?: number | string | bigint;
   decimals?: number;
 };
 
@@ -183,7 +183,7 @@ type LargestTokenAccountsResult = {
 };
 
 type ParsedAccountResult = {
-  value?: {
+  value?: Array<{
     data?: {
       parsed?: {
         info?: {
@@ -192,12 +192,75 @@ type ParsedAccountResult = {
         };
       };
     };
-  }[];
+  }>;
 };
 
 type AssetResult = {
   token_info?: { supply?: string; decimals?: number };
 };
+
+function decimalStringToBaseUnits(value: string | number | bigint | null | undefined, decimals: number): bigint {
+  if (typeof value === "bigint") return value;
+  if (value === null || value === undefined || value === "") return 0n;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return 0n;
+    return decimalStringToBaseUnits(value.toString(), decimals);
+  }
+
+  const input = value.trim();
+  if (!input || input === "0") return 0n;
+  const negative = input.startsWith("-");
+  const unsigned = input.replace(/^[-+]/, "");
+  if (!unsigned.includes(".")) {
+    const base = BigInt(unsigned || "0");
+    return negative ? -base : base;
+  }
+
+  const [wholePart, fractionPart = ""] = unsigned.split(".");
+  const normalizedFraction = fractionPart.slice(0, decimals).padEnd(decimals, "0");
+  const wholeUnits = BigInt(wholePart || "0");
+  const fractionUnits = BigInt(normalizedFraction || "0");
+  const scale = 10n ** BigInt(decimals);
+  const total = wholeUnits * scale + fractionUnits;
+  return negative ? -total : total;
+}
+
+function parseDecimalStringToBigInt(value: string | number | bigint | null | undefined, decimals: number): bigint {
+  if (value === null || value === undefined) return 0n;
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return 0n;
+    return decimalStringToBaseUnits(value.toString(), decimals);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "0") return 0n;
+  if (/^\d+$/.test(trimmed)) return BigInt(trimmed);
+  return decimalStringToBaseUnits(trimmed, decimals);
+}
+
+function rawAmountToBigInt(rawAmount: string | number | bigint | undefined | null, decimals: number): bigint {
+  if (rawAmount === null || rawAmount === undefined) return 0n;
+  return parseDecimalStringToBigInt(rawAmount, decimals);
+}
+
+function toDisplayNumber(raw: bigint, decimals: number): number {
+  if (decimals <= 0) return Number(raw);
+  const magnitude = 10n ** BigInt(decimals);
+  const sign = raw < 0n ? -1n : 1n;
+  const absolute = raw < 0n ? -raw : raw;
+  const whole = absolute / magnitude;
+  const fraction = absolute % magnitude;
+  const fractionText = fraction.toString().padStart(decimals, "0");
+  const valueText = `${whole.toString()}.${fractionText}`.replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+  return Number(valueText) * Number(sign);
+}
+
+function sumBigInts(values: Iterable<bigint>) {
+  let total = 0n;
+  for (const value of values) total += value;
+  return total;
+}
 
 export async function getHolders(mint: string) {
   const [accounts, asset, largestAccounts] = await Promise.all([
@@ -212,8 +275,8 @@ export async function getHolders(mint: string) {
   ]);
 
   const decimals = asset.token_info?.decimals ?? accounts.token_accounts?.[0]?.decimals ?? 0;
-  const supplyRaw = Number(asset.token_info?.supply ?? 0);
-  const totalSupply = supplyRaw > 0 ? supplyRaw / 10 ** decimals : 0;
+  const supplyRaw = rawAmountToBigInt(asset.token_info?.supply ?? "0", decimals);
+  const totalSupply = supplyRaw > 0n ? toDisplayNumber(supplyRaw, decimals) : 0;
   const largest = (largestAccounts.value ?? []).filter((account) => account.address);
   const largestOwners = largest.length
     ? await heliusRpc<ParsedAccountResult>("getMultipleAccounts", [
@@ -221,44 +284,68 @@ export async function getHolders(mint: string) {
         { encoding: "jsonParsed" },
       ])
     : { value: [] };
-  const largestHolders = largest.map((account, index) => ({
-    address: largestOwners.value?.[index]?.data?.parsed?.info?.owner ?? "",
-    amount: typeof account.uiAmount === "number"
-      ? account.uiAmount
-      : Number(account.amount ?? 0) / 10 ** (account.decimals ?? decimals),
-    tokenAccount: account.address ?? null,
-  }));
-  const largestAddresses = new Set(largestHolders.map((holder) => holder.tokenAccount));
-  const additionalHolders = (accounts.token_accounts ?? [])
-    .filter((account) => !largestAddresses.has(account.address ?? null))
-    .map((account) => ({
-      address: account.owner ?? "",
-      amount: Number(account.amount ?? 0) / 10 ** (account.decimals ?? decimals),
-      tokenAccount: account.address ?? null,
+
+  const ownersByAddress = new Map<string, { address: string; amountRaw: bigint; tokenAccounts: Set<string> }>();
+  for (let index = 0; index < largest.length; index += 1) {
+    const account = largest[index];
+    const owner = largestOwners.value?.[index]?.data?.parsed?.info?.owner;
+    if (!owner || !account.address) continue;
+    const amountRaw = rawAmountToBigInt(account.amount ?? "0", account.decimals ?? decimals);
+    const current = ownersByAddress.get(owner) ?? {
+      address: owner,
+      amountRaw: 0n,
+      tokenAccounts: new Set<string>(),
+    };
+    current.amountRaw += amountRaw;
+    current.tokenAccounts.add(account.address);
+    ownersByAddress.set(owner, current);
+  }
+
+  const largestAddresses = new Set(largest.map((account) => account.address));
+  for (const account of accounts.token_accounts ?? []) {
+    if (!account.owner || !account.address || largestAddresses.has(account.address)) continue;
+    const amountRaw = rawAmountToBigInt(account.amount ?? "0", account.decimals ?? decimals);
+    const current = ownersByAddress.get(account.owner) ?? {
+      address: account.owner,
+      amountRaw: 0n,
+      tokenAccounts: new Set<string>(),
+    };
+    current.amountRaw += amountRaw;
+    current.tokenAccounts.add(account.address);
+    ownersByAddress.set(account.owner, current);
+  }
+
+  const holders = [...ownersByAddress.values()]
+    .filter((holder) => holder.address && holder.amountRaw > 0n)
+    .sort((left, right) => {
+      if (right.amountRaw > left.amountRaw) return 1;
+      if (right.amountRaw < left.amountRaw) return -1;
+      return 0;
+    })
+    .slice(0, 50)
+    .map((holder) => ({
+      address: holder.address,
+      amount: toDisplayNumber(holder.amountRaw, decimals),
+      tokenAccount: holder.tokenAccounts.values().next().value ?? null,
+      amountRaw: holder.amountRaw,
     }));
-  const holders = [...largestHolders, ...additionalHolders]
-    .map((account) => ({
-      address: account.address,
-      amount: account.amount,
-      tokenAccount: account.tokenAccount,
-    }))
-    .filter((holder) => holder.address && holder.amount > 0)
-    .sort((left, right) => right.amount - left.amount)
-    .slice(0, 50);
-  const denominator = totalSupply || holders.reduce((sum, holder) => sum + holder.amount, 0);
+
+  const denominator = supplyRaw > 0n ? supplyRaw : sumBigInts(holders.map((holder) => holder.amountRaw));
   const ranked = holders.map((holder, index) => ({
-    ...holder,
+    address: holder.address,
+    amount: holder.amount,
+    tokenAccount: holder.tokenAccount,
     rank: index + 1,
-    percentage: denominator ? (holder.amount / denominator) * 100 : 0,
+    percentage: denominator > 0n ? Number((holder.amountRaw * 10000n) / denominator) / 100 : 0,
   }));
 
   return {
     holders: ranked,
     top10Concentration: ranked.slice(0, 10).reduce((sum, holder) => sum + holder.percentage, 0),
     top20Concentration: ranked.slice(0, 20).reduce((sum, holder) => sum + holder.percentage, 0),
-    totalSupply: denominator,
+    totalSupply: totalSupply,
     decimals,
-    holderCount: accounts.total ?? (accounts.token_accounts ?? []).length,
+    holderCount: ranked.length,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -269,6 +356,11 @@ type TransactionResult = {
   transaction?: {
     message?: {
       accountKeys?: { pubkey?: string; signer?: boolean }[];
+      instructions?: Array<{
+        programId?: string;
+        parsed?: { type?: string; info?: Record<string, unknown> };
+        data?: string;
+      }>;
     };
   };
   meta?: {
@@ -276,33 +368,156 @@ type TransactionResult = {
     preBalances?: number[];
     postBalances?: number[];
     postTokenBalances?: {
+      amount?: string | number | bigint | null;
       accountIndex?: number;
       mint?: string;
       owner?: string;
-      uiTokenAmount?: { uiAmount?: number | null };
+      uiTokenAmount?: { amount?: string | number | bigint | null; decimals?: number | null; uiAmount?: number | null };
     }[];
     preTokenBalances?: {
+      amount?: string | number | bigint | null;
       accountIndex?: number;
       mint?: string;
       owner?: string;
-      uiTokenAmount?: { uiAmount?: number | null };
+      uiTokenAmount?: { amount?: string | number | bigint | null; decimals?: number | null; uiAmount?: number | null };
     }[];
   };
 };
+
+type TransactionActionType = "BUY" | "SELL" | "TRANSFER" | "AIRDROP" | "MINT" | "BURN" | "LP_ADD" | "LP_REMOVE" | "MIGRATION" | "UNKNOWN";
+
+type WalletDeltaEvent = {
+  wallet: string;
+  type: TransactionActionType;
+  amountRaw: bigint;
+  solSpent: number | null;
+  solReceived: number | null;
+  signature: string;
+  timestamp: number | null;
+};
+
+function getInstructionEvidence(transaction: TransactionResult) {
+  const instructions = transaction.transaction?.message?.instructions ?? [];
+  return instructions
+    .map((instruction) => ({
+      programId: instruction.programId ?? "",
+      type: instruction.parsed?.type ?? "",
+      data: instruction.data ?? "",
+    }))
+    .map((instruction) => JSON.stringify(instruction).toLowerCase())
+    .join(" ");
+}
+
+function classifyWalletEvent(
+  transaction: TransactionResult,
+  wallet: string,
+  deltaRaw: bigint,
+  mint: string,
+): TransactionActionType {
+  const evidence = getInstructionEvidence(transaction);
+  const isSwapLike = /jupiter|raydium|orca|phoenix|meteora|pumpswap|saber|amm|trade|swap/.test(evidence);
+  const isMintLike = /mintto|mint_to|mint/.test(evidence);
+  const isBurnLike = /burn|burnchecked/.test(evidence);
+  const isLPLike = /lp|liquidity|addliquidity|removeliquidity/.test(evidence);
+  const isTransferLike = /transferchecked|transfer|accountclose|tokentransfer/.test(evidence);
+  const isAirdropLike = /airdrop|claim|drop|distribute/.test(evidence);
+  const isMigrationLike = /migration|migrate|migrat/.test(evidence);
+
+  if (isSwapLike) return deltaRaw > 0n ? "BUY" : deltaRaw < 0n ? "SELL" : "UNKNOWN";
+  if (isMintLike) return "MINT";
+  if (isBurnLike) return "BURN";
+  if (isLPLike) return deltaRaw > 0n ? "LP_ADD" : deltaRaw < 0n ? "LP_REMOVE" : "UNKNOWN";
+  if (isMigrationLike) return "MIGRATION";
+  if (isAirdropLike) return deltaRaw > 0n ? "AIRDROP" : "UNKNOWN";
+  if (isTransferLike) return deltaRaw > 0n || deltaRaw < 0n ? "TRANSFER" : "UNKNOWN";
+
+  return "UNKNOWN";
+}
+
+function getTokenAmountRaw(balance: { amount?: string | number | bigint | null; uiTokenAmount?: { amount?: string | number | bigint | null; decimals?: number | null; uiAmount?: number | null } | null } | undefined, fallbackDecimals: number): bigint {
+  if (!balance) return 0n;
+  const decimals = balance.uiTokenAmount?.decimals ?? fallbackDecimals;
+  const rawAmount = balance.amount ?? balance.uiTokenAmount?.amount ?? "0";
+  return rawAmountToBigInt(rawAmount, decimals);
+}
+
+function detectWalletEvents(transaction: TransactionResult, mint: string): WalletDeltaEvent[] {
+  const events: WalletDeltaEvent[] = [];
+  const deltas = new Map<string, bigint>();
+  const postList = transaction.meta?.postTokenBalances ?? [];
+  const preList = transaction.meta?.preTokenBalances ?? [];
+
+  for (const balance of postList) {
+    if (!balance.mint || balance.mint !== mint || !balance.owner) continue;
+    const preEntry = preList.find(
+      (candidate) => candidate.accountIndex === balance.accountIndex && candidate.mint === mint && candidate.owner === balance.owner,
+    );
+    const decimals = balance.uiTokenAmount?.decimals ?? preEntry?.uiTokenAmount?.decimals ?? 0;
+    const previousRaw = getTokenAmountRaw(preEntry, decimals);
+    const currentRaw = getTokenAmountRaw(balance, decimals);
+    const delta = currentRaw - previousRaw;
+    deltas.set(balance.owner, (deltas.get(balance.owner) ?? 0n) + delta);
+  }
+
+  for (const [wallet, deltaRaw] of deltas.entries()) {
+    if (deltaRaw === 0n) continue;
+    events.push({
+      wallet,
+      type: classifyWalletEvent(transaction, wallet, deltaRaw, mint),
+      amountRaw: deltaRaw < 0n ? -deltaRaw : deltaRaw,
+      solSpent: estimateSolSpent(transaction, wallet),
+      solReceived: estimateSolReceived(transaction, wallet),
+      signature: transaction.transaction?.message?.accountKeys?.[0]?.pubkey ?? "",
+      timestamp: transaction.blockTime ?? null,
+    });
+  }
+  return events;
+}
+
+function estimateSolSpent(transaction: TransactionResult, buyer: string) {
+  const accountKeys = transaction.transaction?.message?.accountKeys ?? [];
+  const buyerIndex = accountKeys.findIndex((account) => account.pubkey === buyer && account.signer);
+  if (buyerIndex < 0) return null;
+  const pre = transaction.meta?.preBalances?.[buyerIndex];
+  const post = transaction.meta?.postBalances?.[buyerIndex];
+  if (pre === undefined || post === undefined) return null;
+  const fee = transaction.meta?.fee ?? 0;
+  const spent = (pre - post - fee) / 1_000_000_000;
+  return spent > 0 ? spent : null;
+}
+
+function estimateSolReceived(transaction: TransactionResult, wallet: string) {
+  const accountKeys = transaction.transaction?.message?.accountKeys ?? [];
+  const walletIndex = accountKeys.findIndex((account) => account.pubkey === wallet && account.signer);
+  if (walletIndex < 0) return null;
+  const pre = transaction.meta?.preBalances?.[walletIndex];
+  const post = transaction.meta?.postBalances?.[walletIndex];
+  if (pre === undefined || post === undefined) return null;
+  const fee = transaction.meta?.fee ?? 0;
+  const received = (post - pre + fee) / 1_000_000_000;
+  return received > 0 ? received : null;
+}
 
 export async function getEarlyBuyers(mint: string) {
   const [signatures, holderSnapshot] = await Promise.all([
     heliusRpc<SignatureInfo[]>("getSignaturesForAddress", [
       mint,
-      { limit: 100 },
+      { limit: 120 },
     ]),
     getHolders(mint),
   ]);
   const tokenDetail = await getDexToken(mint).catch(() => null);
-  const orderedSignatures = [...(signatures ?? [])].reverse().slice(0, 80);
-  const buyers = new Map<
+  const orderedSignatures = [...(signatures ?? [])].reverse().slice(0, 120);
+  const buyerSummary = new Map<
     string,
-    { timestamp: number | null; amount: number; amountSolSpent: number | null }
+    {
+      totalBoughtRaw: bigint;
+      totalSoldRaw: bigint;
+      totalSpentSol: number;
+      totalReceivedSol: number;
+      firstTimestamp: number | null;
+      lastTimestamp: number | null;
+    }
   >();
 
   for (let index = 0; index < orderedSignatures.length; index += 10) {
@@ -319,25 +534,35 @@ export async function getEarlyBuyers(mint: string) {
     );
 
     for (const transaction of transactions) {
-      if (!transaction) continue;
-      const posts = transaction?.meta?.postTokenBalances ?? [];
-      const pres = transaction?.meta?.preTokenBalances ?? [];
-      for (const post of posts.filter((balance) => balance.mint === mint && balance.owner)) {
-        const previous = pres.find(
-          (balance) => balance.accountIndex === post.accountIndex && balance.mint === mint,
-        )?.uiTokenAmount?.uiAmount ?? 0;
-        const current = post.uiTokenAmount?.uiAmount ?? 0;
-        const delta = current - previous;
-        if (delta > 0 && post.owner) {
-          const existing = buyers.get(post.owner);
-          if (!existing || (transaction.blockTime ?? Infinity) < (existing.timestamp ?? Infinity)) {
-            buyers.set(post.owner, {
-              timestamp: transaction.blockTime ?? null,
-              amount: delta,
-              amountSolSpent: estimateSolSpent(transaction, post.owner),
-            });
-          }
+      if (!transaction || !transaction.blockTime) continue;
+      const walletEvents = detectWalletEvents(transaction, mint);
+      for (const event of walletEvents) {
+        if (event.type !== "BUY" && event.type !== "SELL") continue;
+        const summary = buyerSummary.get(event.wallet) ?? {
+          totalBoughtRaw: 0n,
+          totalSoldRaw: 0n,
+          totalSpentSol: 0,
+          totalReceivedSol: 0,
+          firstTimestamp: null,
+          lastTimestamp: null,
+        };
+
+        if (event.type === "BUY") {
+          summary.totalBoughtRaw += event.amountRaw;
+          if (event.solSpent !== null) summary.totalSpentSol += event.solSpent;
         }
+        if (event.type === "SELL") {
+          summary.totalSoldRaw += event.amountRaw;
+          if (event.solReceived !== null) summary.totalReceivedSol += event.solReceived;
+        }
+
+        if (summary.firstTimestamp === null || event.timestamp! < summary.firstTimestamp) {
+          summary.firstTimestamp = event.timestamp;
+        }
+        if (summary.lastTimestamp === null || event.timestamp! > summary.lastTimestamp) {
+          summary.lastTimestamp = event.timestamp;
+        }
+        buyerSummary.set(event.wallet, summary);
       }
     }
   }
@@ -345,47 +570,72 @@ export async function getEarlyBuyers(mint: string) {
   const launchTimestamp = tokenDetail?.launchTimestamp
     ? Math.floor(new Date(tokenDetail.launchTimestamp).getTime() / 1000)
     : null;
-  const firstBuyerTimestamp = [...buyers.values()]
-    .map((buyer) => buyer.timestamp)
-    .filter((timestamp): timestamp is number => typeof timestamp === "number")
-    .sort((left, right) => left - right)[0];
-  const firstTimestamp =
-    launchTimestamp !== null &&
-    firstBuyerTimestamp !== undefined &&
-    firstBuyerTimestamp >= launchTimestamp &&
-    firstBuyerTimestamp - launchTimestamp < 14 * 86_400
-      ? launchTimestamp
-      : firstBuyerTimestamp;
-  const buyerBalances = await getBuyerBalances(mint, [...buyers.keys()]);
+  const buyerBalances = await getBuyerBalances(mint, [...buyerSummary.keys()]);
+  const decimals = holderSnapshot?.decimals ?? 9;
 
-  return {
-    buyers: [...buyers.entries()]
-      .sort(([, left], [, right]) => (left.timestamp ?? Infinity) - (right.timestamp ?? Infinity))
-      .slice(0, 50)
-      .map(([address, buyer], index) => ({
-        position: index + 1,
+  const buyers = [...buyerSummary.entries()]
+    .map(([address, summary]) => {
+      const currentBalanceRaw = buyerBalances.get(address) ?? 0n;
+      const totalBought = toDisplayNumber(summary.totalBoughtRaw, decimals);
+      const totalSold = toDisplayNumber(summary.totalSoldRaw, decimals);
+      const currentBalance = toDisplayNumber(currentBalanceRaw, decimals);
+      const remainingPercent = totalBought > 0 ? (currentBalance / totalBought) * 100 : 0;
+      const averageEntry = summary.totalSpentSol > 0 && totalBought > 0 ? summary.totalSpentSol / totalBought : null;
+      const averageExit = summary.totalReceivedSol > 0 && totalSold > 0 ? summary.totalReceivedSol / totalSold : null;
+      const realizedPnl = averageEntry !== null && averageExit !== null && totalSold > 0 ? (averageExit - averageEntry) * totalSold : null;
+      const unrealizedPnl = null;
+      const totalReturn = realizedPnl !== null && summary.totalSpentSol > 0 ? (realizedPnl / summary.totalSpentSol) * 100 : null;
+      const hasOpenPosition = currentBalance > 0 || (totalBought > 0 && totalSold < totalBought);
+      const status = hasOpenPosition ? "holding" : totalSold > 0 || totalBought > 0 ? "sold" : "unknown";
+      const firstTimestamp = summary.firstTimestamp;
+      const firstBuyerTimestamp = launchTimestamp !== null && firstTimestamp !== null && firstTimestamp >= launchTimestamp && firstTimestamp - launchTimestamp < 14 * 86_400
+        ? launchTimestamp
+        : firstTimestamp;
+
+      return {
+        position: 0,
         address,
         approximateTimeAfterLaunch:
-          firstTimestamp !== null && firstTimestamp !== undefined && buyer.timestamp
-            ? formatElapsedTime(buyer.timestamp - firstTimestamp)
+          firstBuyerTimestamp !== null && launchTimestamp !== null
+            ? formatElapsedTime(firstBuyerTimestamp - launchTimestamp)
             : null,
-        timestamp: buyer.timestamp ? new Date(buyer.timestamp * 1000).toISOString() : null,
-        amountBought: buyer.amount || null,
-        amountSolSpent: buyer.amountSolSpent,
-        currentBalance: buyerBalances.get(address) ?? null,
-        holdingStatus: buyerBalances.has(address)
-          ? buyerBalances.get(address)! > 0
-            ? "holding"
-            : "sold"
-          : "unknown",
-      })),
+        timestamp: firstTimestamp ? new Date(firstTimestamp * 1000).toISOString() : null,
+        amountBought: totalBought || null,
+        amountSolSpent: summary.totalSpentSol || null,
+        currentBalance: currentBalance || null,
+        totalBought,
+        totalSold,
+        remainingPercent,
+        averageEntry,
+        averageExit,
+        realizedPnl,
+        unrealizedPnl,
+        return: totalReturn,
+        status,
+        holdingStatus: status === "holding" ? "holding" : status === "sold" ? "sold" : "unknown",
+      };
+    })
+    .sort((left, right) => {
+      const leftTime = left.timestamp ? Date.parse(left.timestamp) / 1000 : Number.MAX_SAFE_INTEGER;
+      const rightTime = right.timestamp ? Date.parse(right.timestamp) / 1000 : Number.MAX_SAFE_INTEGER;
+      if (leftTime < rightTime) return -1;
+      if (leftTime > rightTime) return 1;
+      return 0;
+    })
+    .map((buyer, index) => ({
+      ...buyer,
+      position: index + 1,
+    }));
+
+  return {
+    buyers,
     scannedTransactions: orderedSignatures.length,
     fetchedAt: new Date().toISOString(),
   };
 }
 
 async function getBuyerBalances(mint: string, addresses: string[]) {
-  const balances = new Map<string, number>();
+  const balances = new Map<string, bigint>();
   for (let index = 0; index < addresses.length; index += 10) {
     const chunk = addresses.slice(index, index + 10);
     const results = await Promise.all(
@@ -400,8 +650,8 @@ async function getBuyerBalances(mint: string, addresses: string[]) {
           });
           const decimals = result.token_accounts?.[0]?.decimals ?? 0;
           const balance = (result.token_accounts ?? []).reduce(
-            (sum, account) => sum + Number(account.amount ?? 0) / 10 ** decimals,
-            0,
+            (sum, account) => sum + rawAmountToBigInt(account.amount ?? "0", account.decimals ?? decimals),
+            0n,
           );
           return [address, balance] as const;
         } catch {
@@ -426,20 +676,6 @@ function formatElapsedTime(seconds: number) {
   const remainingMinutes = minutes % 60;
   if (hours < 24) return `+${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ""}`;
   return `+${Math.floor(hours / 24)}d`;
-}
-
-function estimateSolSpent(transaction: TransactionResult, buyer: string) {
-  const accountKeys = transaction.transaction?.message?.accountKeys ?? [];
-  const buyerIndex = accountKeys.findIndex(
-    (account) => account.pubkey === buyer && account.signer,
-  );
-  if (buyerIndex < 0) return null;
-  const pre = transaction.meta?.preBalances?.[buyerIndex];
-  const post = transaction.meta?.postBalances?.[buyerIndex];
-  if (pre === undefined || post === undefined) return null;
-  const fee = transaction.meta?.fee ?? 0;
-  const spent = (pre - post - fee) / 1_000_000_000;
-  return spent > 0 ? spent : null;
 }
 
 type DasAsset = {

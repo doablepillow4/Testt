@@ -205,7 +205,7 @@ components:
         fetchedAt: { type: string, format: date-time }
     EarlyBuyer:
       type: object
-      required: [position, address, approximateTimeAfterLaunch, timestamp, amountBought, amountSolSpent, currentBalance, holdingStatus]
+      required: [position, address, approximateTimeAfterLaunch, timestamp, amountBought, amountSolSpent, currentBalance, totalBought, totalSold, remainingPercent, averageEntry, averageExit, realizedPnl, unrealizedPnl, return, status, holdingStatus]
       properties:
         position: { type: number }
         address: { type: string }
@@ -214,6 +214,17 @@ components:
         amountBought: { type: ["number", "null"] }
         amountSolSpent: { type: ["number", "null"] }
         currentBalance: { type: ["number", "null"] }
+        totalBought: { type: ["number", "null"] }
+        totalSold: { type: ["number", "null"] }
+        remainingPercent: { type: ["number", "null"] }
+        averageEntry: { type: ["number", "null"] }
+        averageExit: { type: ["number", "null"] }
+        realizedPnl: { type: ["number", "null"] }
+        unrealizedPnl: { type: ["number", "null"] }
+        return: { type: ["number", "null"] }
+        status:
+          type: string
+          enum: [holding, sold, unknown]
         holdingStatus:
           type: string
           enum: [holding, sold, unknown]

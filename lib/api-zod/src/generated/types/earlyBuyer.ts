@@ -20,5 +20,22 @@ export interface EarlyBuyer {
   amountSolSpent: number | null;
   /** @nullable */
   currentBalance: number | null;
+  /** @nullable */
+  totalBought: number | null;
+  /** @nullable */
+  totalSold: number | null;
+  /** @nullable */
+  remainingPercent: number | null;
+  /** @nullable */
+  averageEntry: number | null;
+  /** @nullable */
+  averageExit: number | null;
+  /** @nullable */
+  realizedPnl: number | null;
+  /** @nullable */
+  unrealizedPnl: number | null;
+  /** @nullable */
+  return: number | null;
+  status: EarlyBuyerHoldingStatus;
   holdingStatus: EarlyBuyerHoldingStatus;
 }

@@ -130,10 +130,19 @@ export const GetTokenEarlyBuyersResponse = zod.object({
   "amountBought": zod.number().nullable(),
   "amountSolSpent": zod.number().nullable(),
   "currentBalance": zod.number().nullable(),
-  "holdingStatus": zod.enum(['holding', 'sold', 'unknown'])
+"totalBought": zod.number().nullable(),
+"totalSold": zod.number().nullable(),
+"remainingPercent": zod.number().nullable(),
+"averageEntry": zod.number().nullable(),
+"averageExit": zod.number().nullable(),
+"realizedPnl": zod.number().nullable(),
+"unrealizedPnl": zod.number().nullable(),
+"return": zod.number().nullable(),
+"status": zod.enum(['holding', 'sold', 'unknown']),
+"holdingStatus": zod.enum(['holding', 'sold', 'unknown'])
 })),
-  "scannedTransactions": zod.number(),
-  "fetchedAt": zod.coerce.date()
+"scannedTransactions": zod.number(),
+"fetchedAt": zod.coerce.date()
 })
 
 
