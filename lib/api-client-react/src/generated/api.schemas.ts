@@ -90,6 +90,46 @@ export interface HoldersResponse {
   fetchedAt: string;
 }
 
+export interface HolderDistributionRisk {
+  mint: string;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  riskScore: number;
+  top10Concentration: number;
+  top20Concentration: number;
+  maxHolderShare: number;
+  holderCount: number;
+  excludedLikelyInfrastructure: number;
+  /** @nullable */
+  liquidityUsd: number | null;
+  reasons: string[];
+  dataCompleteness: 'complete' | 'partial' | 'unknown';
+  fetchedAt: string;
+}
+
+export interface TokenRiskComponentScore {
+  /** @nullable */
+  score: number | null;
+  /** @nullable */
+  severity: 'low' | 'medium' | 'high' | 'critical' | null;
+}
+
+export interface TokenRisk {
+  mint: string;
+  riskScore: number;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  componentScores: {
+    holderConcentration: TokenRiskComponentScore;
+    earlyBuyers: TokenRiskComponentScore;
+    coordinatedWallets: TokenRiskComponentScore;
+    liquidity: TokenRiskComponentScore;
+    dataCompleteness: TokenRiskComponentScore;
+  };
+  reasons: string[];
+  warnings: string[];
+  dataCompleteness: 'complete' | 'partial' | 'unknown';
+  fetchedAt: string;
+}
+
 export type EarlyBuyerHoldingStatus = typeof EarlyBuyerHoldingStatus[keyof typeof EarlyBuyerHoldingStatus];
 
 

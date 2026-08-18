@@ -2,10 +2,14 @@ import { Router, type IRouter } from "express";
 import {
   GetTokenEarlyBuyersParams,
   GetTokenEarlyBuyersResponse,
+  GetTokenHolderRiskParams,
+  GetTokenHolderRiskResponse,
   GetTokenHoldersParams,
   GetTokenHoldersResponse,
   GetTokenParams,
   GetTokenResponse,
+  GetTokenRiskParams,
+  GetTokenRiskResponse,
   GetWalletProfileParams,
   GetWalletProfileResponse,
   SearchTokensQueryParams,
@@ -16,6 +20,8 @@ import {
   getDexToken,
   getEarlyBuyers,
   getHolders,
+  getHolderDistributionRisk,
+  getTokenRisk,
   getWalletProfile,
   logUpstreamError,
   searchDexTokens,
@@ -89,6 +95,21 @@ router.get("/tokens/:mint/buyers", async (req, res): Promise<void> => {
   }
 });
 
+router.get("/tokens/:mint/holder-risk", async (req, res): Promise<void> => {
+  const parsed = GetTokenHolderRiskParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "That does not look like a valid Solana mint address." });
+    return;
+  }
+
+  try {
+    res.json(GetTokenHolderRiskResponse.parse(await getHolderDistributionRisk(parsed.data.mint)));
+  } catch (error) {
+    logUpstreamError(req, error);
+    res.status(502).json({ error: "Holder risk data is unavailable right now. Try again in a moment." });
+  }
+});
+
 router.get("/tokens/:mint/coordinated-wallets", async (req, res): Promise<void> => {
   const parsed = GetTokenHoldersParams.safeParse(req.params);
   if (!parsed.success) {
@@ -101,6 +122,21 @@ router.get("/tokens/:mint/coordinated-wallets", async (req, res): Promise<void> 
   } catch (error) {
     logUpstreamError(req, error);
     res.status(502).json({ error: "Coordinated wallet intelligence is unavailable right now. Try again in a moment." });
+  }
+});
+
+router.get("/tokens/:mint/risk", async (req, res): Promise<void> => {
+  const parsed = GetTokenRiskParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "That does not look like a valid Solana mint address." });
+    return;
+  }
+
+  try {
+    res.json(GetTokenRiskResponse.parse(await getTokenRisk(parsed.data.mint)));
+  } catch (error) {
+    logUpstreamError(req, error);
+    res.status(502).json({ error: "Token risk data is unavailable right now. Try again in a moment." });
   }
 });
 

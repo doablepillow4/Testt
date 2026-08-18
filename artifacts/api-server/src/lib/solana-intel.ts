@@ -350,6 +350,399 @@ export async function getHolders(mint: string) {
   };
 }
 
+export type HolderDistributionRiskLevel = "low" | "medium" | "high" | "critical";
+
+export function analyzeHolderDistributionRisk({
+  holders,
+  totalSupply,
+  liquidityUsd,
+}: {
+  holders: Array<{ address: string; percentage: number }>;
+  totalSupply?: number;
+  liquidityUsd?: number | null;
+}) {
+  const normalizedHolders = holders
+    .filter((holder) => holder && holder.address && !isLikelyInfrastructureWallet(holder.address))
+    .sort((left, right) => right.percentage - left.percentage);
+
+  const excludedLikelyInfrastructure = holders.length - normalizedHolders.length;
+  const top10Concentration = normalizedHolders.slice(0, 10).reduce((sum, holder) => sum + holder.percentage, 0);
+  const top20Concentration = normalizedHolders.slice(0, 20).reduce((sum, holder) => sum + holder.percentage, 0);
+  const maxHolderShare = normalizedHolders[0]?.percentage ?? 0;
+  const holderCount = normalizedHolders.length;
+  const safeLiquidityUsd = liquidityUsd ?? null;
+
+  if (holderCount === 0 || !Number.isFinite(totalSupply ?? 0) || (typeof totalSupply === "number" && totalSupply <= 0)) {
+    return {
+      riskLevel: "medium" as HolderDistributionRiskLevel,
+      riskScore: 50,
+      top10Concentration,
+      top20Concentration,
+      maxHolderShare,
+      holderCount,
+      excludedLikelyInfrastructure,
+      liquidityUsd: safeLiquidityUsd,
+      reasons: [
+        "Insufficient holder data to assess concentration with confidence.",
+        "The risk Level is conservative because the supply distribution could not be validated.",
+      ],
+      dataCompleteness: "unknown" as const,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const concentrationScore = top10Concentration * 0.6 + top20Concentration * 0.25 + maxHolderShare * 0.35;
+  const holderCountPenalty = holderCount < 25 ? 4 : holderCount < 50 ? 2 : 0;
+  const liquidityPenalty = safeLiquidityUsd === null ? 8 : safeLiquidityUsd < 50_000 ? 8 : safeLiquidityUsd < 250_000 ? 4 : 0;
+  const score = Math.min(100, Math.max(0, concentrationScore + holderCountPenalty + liquidityPenalty));
+
+  let riskLevel: HolderDistributionRiskLevel = "low";
+  if (score >= 70) riskLevel = "critical";
+  else if (score >= 55) riskLevel = "high";
+  else if (score >= 35) riskLevel = "medium";
+
+  const reasons = [
+    `The top 10 holders control ${top10Concentration.toFixed(2)}% of supply.`,
+    `The largest holder represents ${maxHolderShare.toFixed(2)}% of the circulating supply.`,
+  ];
+
+  if (excludedLikelyInfrastructure > 0) {
+    reasons.push(`Excluded ${excludedLikelyInfrastructure} likely LP/router/burn/infrastructure wallets from concentration scoring.`);
+  }
+
+  if (safeLiquidityUsd === null) {
+    reasons.push("Liquidity is unavailable, so the risk estimate is intentionally conservative.");
+  } else if (safeLiquidityUsd < 50_000) {
+    reasons.push(`Liquidity is only ${safeLiquidityUsd.toLocaleString()} USD, which leaves less buffer against wallet concentration.`);
+  } else {
+    reasons.push(`Liquidity is estimated at ${safeLiquidityUsd.toLocaleString()} USD, which reduces downside risk somewhat.`);
+  }
+
+  if (holderCount < 25) {
+    reasons.push("The token is distributed across a relatively small set of holders, increasing concentration risk.");
+  }
+
+  return {
+    riskLevel,
+    riskScore: Number(score.toFixed(2)),
+    top10Concentration: Number(top10Concentration.toFixed(2)),
+    top20Concentration: Number(top20Concentration.toFixed(2)),
+    maxHolderShare: Number(maxHolderShare.toFixed(2)),
+    holderCount,
+    excludedLikelyInfrastructure,
+    liquidityUsd: safeLiquidityUsd,
+    reasons: reasons.slice(0, 4),
+    dataCompleteness: holderCount < 10 ? "partial" : "complete",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getHolderDistributionRisk(mint: string) {
+  const [holderSnapshot, token] = await Promise.all([
+    getHolders(mint),
+    getDexToken(mint).catch(() => null),
+  ]);
+
+  const analysis = analyzeHolderDistributionRisk({
+    holders: holderSnapshot.holders.map((holder) => ({ address: holder.address, percentage: holder.percentage })),
+    totalSupply: holderSnapshot.totalSupply,
+    liquidityUsd: token?.liquidityUsd ?? null,
+  });
+
+  return {
+    mint,
+    ...analysis,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export type TokenRiskSeverity = "low" | "medium" | "high" | "critical";
+
+function clampRisk(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function scoreToSeverity(score: number): TokenRiskSeverity {
+  if (score >= 75) return "critical";
+  if (score >= 55) return "high";
+  if (score >= 30) return "medium";
+  return "low";
+}
+
+function mergeReasons(list: Array<string | null | undefined>): string[] {
+  return [...new Set(list.filter((value): value is string => Boolean(value)))];
+}
+
+function determineBuyerScore(subset: { buyers?: Array<{ status?: string; dataCompleteness?: string; totalBought?: number | null; totalSold?: number | null; currentBalance?: number | null; remainingPercent?: number | null }> } | null | undefined): { score: number | null; reasons: string[]; warnings: string[]; dataCompleteness: "complete" | "partial" | "unknown" } {
+  if (!subset || !Array.isArray(subset.buyers)) {
+    return {
+      score: null,
+      reasons: ["Early-buyer intelligence was unavailable; the score is intentionally left unknown rather than fabricated."],
+      warnings: ["Missing early-buyer data prevents a confident low-risk claim."],
+      dataCompleteness: "unknown",
+    };
+  }
+
+  const buyers = subset.buyers;
+  if (!buyers.length) {
+    return {
+      score: 0,
+      reasons: ["No qualifying early-buyer trades were identified from the available transaction history."],
+      warnings: ["No early-buyer evidence was found; the score is not treated as a false low-risk result simply because no trades were observed."],
+      dataCompleteness: "partial",
+    };
+  }
+
+  const problematic = buyers.filter((buyer) => {
+    const totalBought = buyer.totalBought ?? 0;
+    const totalSold = buyer.totalSold ?? 0;
+    const currentBalance = buyer.currentBalance ?? 0;
+    const remainingPercent = buyer.remainingPercent ?? 0;
+    const hasIncompleteHistory = buyer.dataCompleteness === "partial" || buyer.dataCompleteness === "unknown" || totalSold > totalBought || (totalBought === 0 && totalSold > 0) || (totalBought === 0 && currentBalance > 0);
+    return buyer.status === "unknown" || hasIncompleteHistory || remainingPercent > 100;
+  });
+
+  const incompleteShare = buyers.length ? problematic.length / buyers.length : 0;
+  const hasHigherSells = buyers.some((buyer) => {
+    const totalSold = buyer.totalSold ?? 0;
+    const totalBought = buyer.totalBought ?? 0;
+    return totalSold > totalBought;
+  });
+  const score = clampRisk(10 + incompleteShare * 65 + (hasHigherSells ? 18 : 0));
+
+  const reasons = [
+    `Early-buyer history was ${buyers.some((buyer) => buyer.dataCompleteness === "complete") ? "partially" : "not fully"} validated across ${buyers.length} wallets.`,
+  ];
+  if (problematic.length) {
+    reasons.push(`${problematic.length} early-buyer records show incomplete or inconsistent positions.`);
+  }
+
+  const warnings = [
+    "Partial or missing trade history raises uncertainty; scores do not assume safety when buyer history is incomplete.",
+  ];
+  const dataCompleteness = buyers.some((buyer) => buyer.dataCompleteness === "partial" || buyer.dataCompleteness === "unknown") ? "partial" : "complete";
+
+  return { score, reasons, warnings, dataCompleteness };
+}
+
+function determineCoordinationScore(subset: { clusters?: Array<{ confidence?: number; reasons?: string[]; signals?: Array<{ type?: string; strength?: number; summary?: string }> }> } | null | undefined): { score: number | null; reasons: string[]; warnings: string[]; dataCompleteness: "complete" | "partial" | "unknown" } {
+  if (!subset || !Array.isArray(subset.clusters)) {
+    return {
+      score: null,
+      reasons: ["Coordinated-wallet intelligence was unavailable; the component remains unknown rather than being forced to zero."],
+      warnings: ["Missing coordination data prevents a confident low-risk score."],
+      dataCompleteness: "unknown",
+    };
+  }
+
+  const clusters = subset.clusters;
+  if (!clusters.length) {
+    return {
+      score: 0,
+      reasons: ["No coordinated-wallet cluster met the multi-signal threshold."],
+      warnings: ["No cluster was produced; weak same-transaction patterns alone were not treated as coordination evidence."],
+      dataCompleteness: "partial",
+    };
+  }
+
+  const highestConfidence = clusters.reduce((max, cluster) => Math.max(max, cluster.confidence ?? 0), 0);
+  const score = clampRisk(highestConfidence * 85 + Math.min(15, clusters.length * 7));
+  const reasons = clusters.slice(0, 3).flatMap((cluster) => cluster.reasons ?? []);
+  const warnings = [
+    "Coordination signals are heuristic and probabilistic; they are not proof of common ownership or collusion.",
+  ];
+  const dataCompleteness = clusters.length >= 2 ? "complete" : "partial";
+
+  return { score, reasons, warnings, dataCompleteness };
+}
+
+function determineLiquidityScore(tokenInfo: { liquidityUsd?: number | null } | null | undefined): { score: number; reasons: string[]; warnings: string[]; dataCompleteness: "complete" | "partial" | "unknown" } {
+  const liquidityUsd = tokenInfo?.liquidityUsd ?? null;
+  if (liquidityUsd === null) {
+    return {
+      score: 22,
+      reasons: ["Liquidity is unavailable, so the risk model does not assume the market is safe."],
+      warnings: ["Missing liquidity data increases uncertainty rather than lowering risk."],
+      dataCompleteness: "unknown",
+    };
+  }
+
+  if (liquidityUsd < 50_000) {
+    return {
+      score: 48,
+      reasons: [`Liquidity is only ${liquidityUsd.toLocaleString()} USD, leaving a thinner buffer against concentrated moves.`],
+      warnings: ["Thin liquidity increases the impact of large wallet activity."],
+      dataCompleteness: "complete",
+    };
+  }
+  if (liquidityUsd < 250_000) {
+    return {
+      score: 30,
+      reasons: [`Liquidity is modest at ${liquidityUsd.toLocaleString()} USD, so price impact remains elevated relative to concentrated holders.`],
+      warnings: [],
+      dataCompleteness: "complete",
+    };
+  }
+
+  return {
+    score: 12,
+    reasons: [`Liquidity at ${liquidityUsd.toLocaleString()} USD provides more buffer against concentrated wallet pressure.`],
+    warnings: [],
+    dataCompleteness: "complete",
+  };
+}
+
+function determineCompletenessScore(partials: Array<"complete" | "partial" | "unknown">): { score: number; reasons: string[]; warnings: string[]; dataCompleteness: "complete" | "partial" | "unknown" } {
+  const counts = { complete: 0, partial: 0, unknown: 0 };
+  for (const value of partials) counts[value] += 1;
+  const score = counts.unknown > 0 ? 30 : counts.partial > 0 ? 18 : 0;
+  const dataCompleteness = counts.unknown > 0 ? "unknown" : counts.partial > 0 ? "partial" : "complete";
+  const reasons = [] as string[];
+  if (dataCompleteness !== "complete") reasons.push("The score is intentionally conservative because some intelligence inputs are incomplete or missing.");
+  const warnings = dataCompleteness !== "complete" ? ["Partial data reduces confidence and prevents a lower-risk rating from being treated as certain."] : [];
+  return { score, reasons, warnings, dataCompleteness };
+}
+
+export function analyzeTokenRisk({
+  holderRisk,
+  earlyBuyers,
+  coordinatedWallets,
+  marketData,
+}: {
+  holderRisk?: { riskScore?: number; reasons?: string[]; dataCompleteness?: "complete" | "partial" | "unknown" | string } | null;
+  earlyBuyers?: { buyers?: Array<{ status?: string; dataCompleteness?: string; totalBought?: number | null; totalSold?: number | null; currentBalance?: number | null; remainingPercent?: number | null }> } | null;
+  coordinatedWallets?: { clusters?: Array<{ confidence?: number; reasons?: string[]; signals?: Array<{ type?: string; strength?: number; summary?: string }> }> } | null;
+  marketData?: { liquidityUsd?: number | null } | null;
+}) {
+  const holderScore = typeof holderRisk?.riskScore === "number" && Number.isFinite(holderRisk.riskScore)
+    ? clampRisk(holderRisk.riskScore)
+    : null;
+  const holderDetails = holderRisk ?? null;
+  const holderCompleteness = holderDetails?.dataCompleteness === "complete" || holderDetails?.dataCompleteness === "partial" || holderDetails?.dataCompleteness === "unknown"
+    ? holderDetails.dataCompleteness
+    : "unknown";
+  const holderReasons = mergeReasons(holderDetails?.reasons ?? []);
+
+  const buyerDetails = determineBuyerScore(earlyBuyers);
+  const coordDetails = determineCoordinationScore(coordinatedWallets);
+  const liquidityDetails = determineLiquidityScore(marketData);
+  const completenessDetails = determineCompletenessScore([
+    holderCompleteness,
+    buyerDetails.dataCompleteness,
+    coordDetails.dataCompleteness,
+    liquidityDetails.dataCompleteness,
+  ]);
+
+  const holderComponent = holderScore !== null
+    ? { score: Number(holderScore.toFixed(2)), severity: scoreToSeverity(holderScore) }
+    : { score: null, severity: null as TokenRiskSeverity | null };
+  const buyerComponent = buyerDetails.score !== null
+    ? { score: Number(buyerDetails.score.toFixed(2)), severity: scoreToSeverity(buyerDetails.score) }
+    : { score: null, severity: null as TokenRiskSeverity | null };
+  const coordComponent = coordDetails.score !== null
+    ? { score: Number(coordDetails.score.toFixed(2)), severity: scoreToSeverity(coordDetails.score) }
+    : { score: null, severity: null as TokenRiskSeverity | null };
+
+  const hasCriticalDataGap = [holderComponent.score === null, buyerComponent.score === null, coordComponent.score === null].filter(Boolean).length > 0;
+
+  if (hasCriticalDataGap) {
+    const riskScore = clampRisk(60 + [holderComponent.score === null, buyerComponent.score === null, coordComponent.score === null].filter(Boolean).length * 8 + (liquidityDetails.score * 0.2));
+    const reasons = mergeReasons([
+      ...holderReasons,
+      ...buyerDetails.reasons,
+      ...coordDetails.reasons,
+      ...liquidityDetails.reasons,
+      "Insufficient critical intelligence data was available; this score is intentionally conservative and not a low-risk claim.",
+    ]).slice(0, 8);
+    const warnings = mergeReasons([
+      ...buyerDetails.warnings,
+      ...coordDetails.warnings,
+      ...liquidityDetails.warnings,
+      "Missing holder-risk, early-buyer, or coordinated-wallet intelligence prevents a confident low-risk classification.",
+      ...completenessDetails.warnings,
+    ]);
+
+    return {
+      riskScore: Number(riskScore.toFixed(2)),
+      severity: scoreToSeverity(riskScore),
+      componentScores: {
+        holderConcentration: holderComponent,
+        earlyBuyers: buyerComponent,
+        coordinatedWallets: coordComponent,
+        liquidity: { score: Number(liquidityDetails.score.toFixed(2)), severity: scoreToSeverity(liquidityDetails.score) },
+        dataCompleteness: { score: Number(completenessDetails.score.toFixed(2)), severity: scoreToSeverity(completenessDetails.score) },
+      },
+      reasons,
+      warnings,
+      dataCompleteness: "unknown",
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const baseScore =
+    0.35 * (holderComponent.score ?? 0) +
+    0.25 * (buyerComponent.score ?? 0) +
+    0.2 * (coordComponent.score ?? 0) +
+    0.1 * liquidityDetails.score +
+    0.1 * completenessDetails.score;
+  const overlapPenalty = Math.max(0, (holderComponent.score ?? 0) + (buyerComponent.score ?? 0) + (coordComponent.score ?? 0) - 120) * 0.15;
+  const riskScore = clampRisk(baseScore - overlapPenalty);
+  const severity = scoreToSeverity(riskScore);
+
+  const reasons = mergeReasons([
+    ...holderReasons,
+    ...buyerDetails.reasons,
+    ...coordDetails.reasons,
+    ...liquidityDetails.reasons,
+    ...completenessDetails.reasons,
+  ]).slice(0, 8);
+  const warnings = mergeReasons([
+    ...buyerDetails.warnings,
+    ...coordDetails.warnings,
+    ...liquidityDetails.warnings,
+    ...completenessDetails.warnings,
+  ]);
+
+  return {
+    riskScore: Number(riskScore.toFixed(2)),
+    severity,
+    componentScores: {
+      holderConcentration: holderComponent,
+      earlyBuyers: buyerComponent,
+      coordinatedWallets: coordComponent,
+      liquidity: { score: Number(liquidityDetails.score.toFixed(2)), severity: scoreToSeverity(liquidityDetails.score) },
+      dataCompleteness: { score: Number(completenessDetails.score.toFixed(2)), severity: scoreToSeverity(completenessDetails.score) },
+    },
+    reasons,
+    warnings,
+    dataCompleteness: completenessDetails.dataCompleteness,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getTokenRisk(mint: string) {
+  const [holderRisk, buyers, coordinated, marketData] = await Promise.all([
+    getHolderDistributionRisk(mint).catch(() => null),
+    getEarlyBuyers(mint).catch(() => null),
+    getCoordinatedWallets(mint).catch(() => null),
+    getDexToken(mint).catch(() => null),
+  ]);
+
+  const analysis = analyzeTokenRisk({
+    holderRisk,
+    earlyBuyers: buyers,
+    coordinatedWallets: coordinated,
+    marketData,
+  });
+
+  return {
+    mint,
+    ...analysis,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 type SignatureInfo = { signature?: string; blockTime?: number | null };
 type TransactionResult = {
   blockTime?: number | null;
@@ -786,8 +1179,8 @@ type CoordinatedWalletCluster = {
 
 function isLikelyInfrastructureWallet(wallet: string): boolean {
   const value = wallet.toLowerCase();
-  return /^(lp|router|dex|amm|vault|pool|treasury|market|program|jupiter|raydium|orca|phoenix|meteora|pumpswap|saber|serum|whirlpool|solana|system|spl-token|wrapped-sol)/.test(value)
-    || /(lp|router|dex|amm|vault|pool|treasury|market|program)/.test(value);
+  return /^(lp|router|dex|amm|vault|pool|treasury|market|program|burn|jupiter|raydium|orca|phoenix|meteora|pumpswap|saber|serum|whirlpool|solana|system|spl-token|wrapped-sol)/.test(value)
+    || /(lp|router|dex|amm|vault|pool|treasury|market|program|burn)/.test(value);
 }
 
 function inferFundingSource(transaction: TransactionResult, wallet: string): string | null {
