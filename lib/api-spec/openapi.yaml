@@ -95,6 +95,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EarlyBuyersResponse"
+  /tokens/{mint}/holder-risk:
+    get:
+      operationId: getTokenHolderRisk
+      tags: [tokens]
+      summary: Score the token's holder distribution risk
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Holder distribution risk analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HolderDistributionRiskResponse"
+  /tokens/{mint}/risk:
+    get:
+      operationId: getTokenRisk
+      tags: [tokens]
+      summary: Combine holder, buyer, coordination, liquidity, and completeness signals into a risk score
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Unified token risk analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRiskResponse"
   /tokens/{mint}/coordinated-wallets:
     get:
       operationId: getCoordinatedWallets
@@ -255,6 +283,29 @@ components:
             $ref: "#/components/schemas/EarlyBuyer"
         scannedTransactions: { type: number }
         fetchedAt: { type: string, format: date-time }
+    HolderDistributionRiskResponse:
+      type: object
+      required: [mint, riskLevel, riskScore, top10Concentration, top20Concentration, maxHolderShare, holderCount, excludedLikelyInfrastructure, liquidityUsd, reasons, dataCompleteness, fetchedAt]
+      properties:
+        mint: { type: string }
+        riskLevel:
+          type: string
+          enum: [low, medium, high, critical]
+        riskScore: { type: number }
+        top10Concentration: { type: number }
+        top20Concentration: { type: number }
+        maxHolderShare: { type: number }
+        holderCount: { type: number }
+        excludedLikelyInfrastructure: { type: number }
+        liquidityUsd: { type: ["number", "null"] }
+        reasons:
+          type: array
+          items:
+            type: string
+        dataCompleteness:
+          type: string
+          enum: [complete, partial, unknown]
+        fetchedAt: { type: string, format: date-time }
     CoordinatedWalletSignal:
       type: object
       required: [type, strength, summary]
@@ -312,6 +363,44 @@ components:
         dataCompleteness:
           type: string
           enum: [complete, partial, unknown]
+    TokenRiskComponentScore:
+      type: object
+      required: [score, severity]
+      properties:
+        score: { type: ["number", "null"] }
+        severity:
+          type: ["string", "null"]
+          enum: [low, medium, high, critical, null]
+    TokenRiskResponse:
+      type: object
+      required: [mint, riskScore, severity, componentScores, reasons, warnings, dataCompleteness, fetchedAt]
+      properties:
+        mint: { type: string }
+        riskScore: { type: number }
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        componentScores:
+          type: object
+          required: [holderConcentration, earlyBuyers, coordinatedWallets, liquidity, dataCompleteness]
+          properties:
+            holderConcentration: { $ref: "#/components/schemas/TokenRiskComponentScore" }
+            earlyBuyers: { $ref: "#/components/schemas/TokenRiskComponentScore" }
+            coordinatedWallets: { $ref: "#/components/schemas/TokenRiskComponentScore" }
+            liquidity: { $ref: "#/components/schemas/TokenRiskComponentScore" }
+            dataCompleteness: { $ref: "#/components/schemas/TokenRiskComponentScore" }
+        reasons:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        dataCompleteness:
+          type: string
+          enum: [complete, partial, unknown]
+        fetchedAt: { type: string, format: date-time }
     WalletAsset:
       type: object
       required: [id, name, symbol, amount, decimals]

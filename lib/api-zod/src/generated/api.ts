@@ -146,6 +146,66 @@ export const GetTokenEarlyBuyersResponse = zod.object({
 "fetchedAt": zod.coerce.date()
 })
 
+/**
+ * @summary Score the token's holder distribution risk
+ */
+export const getTokenHolderRiskPathMintMin = 32;
+export const GetTokenHolderRiskParams = zod.object({
+ "mint": zod.coerce.string().min(getTokenHolderRiskPathMintMin)
+});
+export const GetTokenHolderRiskResponse = zod.object({
+ "mint": zod.string(),
+ "riskLevel": zod.enum(['low', 'medium', 'high', 'critical']),
+ "riskScore": zod.number(),
+ "top10Concentration": zod.number(),
+ "top20Concentration": zod.number(),
+ "maxHolderShare": zod.number(),
+ "holderCount": zod.number(),
+ "excludedLikelyInfrastructure": zod.number(),
+ "liquidityUsd": zod.number().nullable(),
+ "reasons": zod.array(zod.string()),
+ "dataCompleteness": zod.enum(['complete', 'partial', 'unknown']),
+ "fetchedAt": zod.coerce.date()
+});
+
+/**
+ * @summary Combine holder, buyer, coordination, liquidity, and completeness signals into a risk score
+ */
+export const getTokenRiskPathMintMin = 32;
+export const GetTokenRiskParams = zod.object({
+ "mint": zod.coerce.string().min(getTokenRiskPathMintMin)
+});
+export const GetTokenRiskResponse = zod.object({
+ "mint": zod.string(),
+ "riskScore": zod.number(),
+ "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+ "componentScores": zod.object({
+   "holderConcentration": zod.object({
+     "score": zod.number().nullable(),
+     "severity": zod.enum(['low', 'medium', 'high', 'critical']).nullable()
+   }),
+   "earlyBuyers": zod.object({
+     "score": zod.number().nullable(),
+     "severity": zod.enum(['low', 'medium', 'high', 'critical']).nullable()
+   }),
+   "coordinatedWallets": zod.object({
+     "score": zod.number().nullable(),
+     "severity": zod.enum(['low', 'medium', 'high', 'critical']).nullable()
+   }),
+   "liquidity": zod.object({
+     "score": zod.number(),
+     "severity": zod.enum(['low', 'medium', 'high', 'critical'])
+   }),
+   "dataCompleteness": zod.object({
+     "score": zod.number(),
+     "severity": zod.enum(['low', 'medium', 'high', 'critical'])
+   })
+ }),
+ "reasons": zod.array(zod.string()),
+ "warnings": zod.array(zod.string()),
+ "dataCompleteness": zod.enum(['complete', 'partial', 'unknown']),
+ "fetchedAt": zod.coerce.date()
+});
 
 /**
  * @summary Get holdings and recent activity for a wallet
