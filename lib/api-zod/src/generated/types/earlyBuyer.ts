@@ -38,4 +38,5 @@ export interface EarlyBuyer {
   return: number | null;
   status: EarlyBuyerHoldingStatus;
   holdingStatus: EarlyBuyerHoldingStatus;
+  dataCompleteness: 'complete' | 'partial' | 'unknown';
 }

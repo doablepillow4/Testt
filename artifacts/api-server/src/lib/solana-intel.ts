@@ -385,6 +385,7 @@ type TransactionResult = {
 };
 
 type TransactionActionType = "BUY" | "SELL" | "TRANSFER" | "AIRDROP" | "MINT" | "BURN" | "LP_ADD" | "LP_REMOVE" | "MIGRATION" | "UNKNOWN";
+type DataCompleteness = "complete" | "partial" | "unknown";
 
 type WalletDeltaEvent = {
   wallet: string;
@@ -395,6 +396,84 @@ type WalletDeltaEvent = {
   signature: string;
   timestamp: number | null;
 };
+
+export function computeRemainingPercent(currentBalanceRaw: bigint, totalBoughtRaw: bigint): number {
+  if (totalBoughtRaw <= 0n) {
+    return 0;
+  }
+
+  const rawPercent = (currentBalanceRaw * 10000n) / totalBoughtRaw;
+  const percent = Number(rawPercent) / 100;
+  if (!Number.isFinite(percent)) return 0;
+  if (percent > 100) return 100;
+  if (percent < 0) return 0;
+  return percent;
+}
+
+export function summarizeBuyerPosition({
+  currentBalanceRaw,
+  totalBoughtRaw,
+  totalSoldRaw,
+  totalSpentSol,
+  totalReceivedSol,
+  decimals,
+  dataCompleteness,
+}: {
+  currentBalanceRaw: bigint;
+  totalBoughtRaw: bigint;
+  totalSoldRaw: bigint;
+  totalSpentSol: number;
+  totalReceivedSol: number;
+  decimals: number;
+  dataCompleteness?: DataCompleteness;
+}) {
+  const totalBought = toDisplayNumber(totalBoughtRaw, decimals);
+  const totalSold = toDisplayNumber(totalSoldRaw, decimals);
+  const currentBalance = toDisplayNumber(currentBalanceRaw, decimals);
+  const hasObservedBuy = totalBoughtRaw > 0n;
+  const hasObservedSell = totalSoldRaw > 0n;
+  const hasObservedTradingHistory = hasObservedBuy || hasObservedSell;
+  const hasIncompleteHistory = totalSoldRaw > totalBoughtRaw || (totalSoldRaw > 0n && !hasObservedBuy);
+  const hasBuyDerivedPosition = hasObservedBuy && totalBoughtRaw > totalSoldRaw;
+
+  const remainingPercent = hasObservedBuy ? computeRemainingPercent(currentBalanceRaw, totalBoughtRaw) : 0;
+  const status = !hasObservedTradingHistory
+    ? "unknown"
+    : hasIncompleteHistory
+      ? "unknown"
+      : currentBalanceRaw > 0n && hasBuyDerivedPosition
+        ? "holding"
+        : currentBalanceRaw <= 0n && hasObservedBuy
+          ? "sold"
+          : "unknown";
+
+  const effectiveCompleteness = hasIncompleteHistory ? "partial" : dataCompleteness ?? (hasObservedTradingHistory ? "complete" : "unknown");
+  const averageEntry = totalSpentSol > 0 && totalBought > 0 && totalBoughtRaw > 0n ? totalSpentSol / totalBought : null;
+  const averageExit = totalReceivedSol > 0 && totalSold > 0 && totalSoldRaw > 0n ? totalReceivedSol / totalSold : null;
+  const realizedPnl =
+    averageEntry !== null &&
+    averageExit !== null &&
+    totalSold > 0 &&
+    totalSoldRaw <= totalBoughtRaw &&
+    totalBoughtRaw > 0n
+      ? (averageExit - averageEntry) * totalSold
+      : null;
+
+  return {
+    totalBought,
+    totalSold,
+    currentBalance,
+    remainingPercent,
+    averageEntry,
+    averageExit,
+    realizedPnl,
+    unrealizedPnl: null,
+    return: null,
+    status,
+    holdingStatus: status,
+    dataCompleteness: effectiveCompleteness,
+  };
+}
 
 function getInstructionEvidence(transaction: TransactionResult) {
   const instructions = transaction.transaction?.message?.instructions ?? [];
@@ -572,21 +651,21 @@ export async function getEarlyBuyers(mint: string) {
     : null;
   const buyerBalances = await getBuyerBalances(mint, [...buyerSummary.keys()]);
   const decimals = holderSnapshot?.decimals ?? 9;
+  const dataCompleteness: DataCompleteness = orderedSignatures.length === 0 ? "partial" : "complete";
 
   const buyers = [...buyerSummary.entries()]
     .map(([address, summary]) => {
       const currentBalanceRaw = buyerBalances.get(address) ?? 0n;
-      const totalBought = toDisplayNumber(summary.totalBoughtRaw, decimals);
-      const totalSold = toDisplayNumber(summary.totalSoldRaw, decimals);
-      const currentBalance = toDisplayNumber(currentBalanceRaw, decimals);
-      const remainingPercent = totalBought > 0 ? (currentBalance / totalBought) * 100 : 0;
-      const averageEntry = summary.totalSpentSol > 0 && totalBought > 0 ? summary.totalSpentSol / totalBought : null;
-      const averageExit = summary.totalReceivedSol > 0 && totalSold > 0 ? summary.totalReceivedSol / totalSold : null;
-      const realizedPnl = averageEntry !== null && averageExit !== null && totalSold > 0 ? (averageExit - averageEntry) * totalSold : null;
-      const unrealizedPnl = null;
-      const totalReturn = realizedPnl !== null && summary.totalSpentSol > 0 ? (realizedPnl / summary.totalSpentSol) * 100 : null;
-      const hasOpenPosition = currentBalance > 0 || (totalBought > 0 && totalSold < totalBought);
-      const status = hasOpenPosition ? "holding" : totalSold > 0 || totalBought > 0 ? "sold" : "unknown";
+      const positionSummary = summarizeBuyerPosition({
+        currentBalanceRaw,
+        totalBoughtRaw: summary.totalBoughtRaw,
+        totalSoldRaw: summary.totalSoldRaw,
+        totalSpentSol: summary.totalSpentSol,
+        totalReceivedSol: summary.totalReceivedSol,
+        decimals,
+        dataCompleteness,
+      });
+
       const firstTimestamp = summary.firstTimestamp;
       const firstBuyerTimestamp = launchTimestamp !== null && firstTimestamp !== null && firstTimestamp >= launchTimestamp && firstTimestamp - launchTimestamp < 14 * 86_400
         ? launchTimestamp
@@ -600,19 +679,20 @@ export async function getEarlyBuyers(mint: string) {
             ? formatElapsedTime(firstBuyerTimestamp - launchTimestamp)
             : null,
         timestamp: firstTimestamp ? new Date(firstTimestamp * 1000).toISOString() : null,
-        amountBought: totalBought || null,
+        amountBought: positionSummary.totalBought || null,
         amountSolSpent: summary.totalSpentSol || null,
-        currentBalance: currentBalance || null,
-        totalBought,
-        totalSold,
-        remainingPercent,
-        averageEntry,
-        averageExit,
-        realizedPnl,
-        unrealizedPnl,
-        return: totalReturn,
-        status,
-        holdingStatus: status === "holding" ? "holding" : status === "sold" ? "sold" : "unknown",
+        currentBalance: positionSummary.currentBalance || null,
+        totalBought: positionSummary.totalBought,
+        totalSold: positionSummary.totalSold,
+        remainingPercent: positionSummary.remainingPercent,
+        averageEntry: positionSummary.averageEntry,
+        averageExit: positionSummary.averageExit,
+        realizedPnl: positionSummary.realizedPnl,
+        unrealizedPnl: positionSummary.unrealizedPnl,
+        return: positionSummary.return,
+        status: positionSummary.status,
+        holdingStatus: positionSummary.holdingStatus,
+        dataCompleteness: positionSummary.dataCompleteness,
       };
     })
     .sort((left, right) => {

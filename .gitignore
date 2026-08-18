@@ -1,3 +1,7 @@
+﻿.env
+.env.*
+!.env.example
+
 # See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
 
 # compiled output
@@ -43,6 +47,10 @@ Thumbs.db
 
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
+
+.env
+.env.*
+!.env.example
 
 # Replit
 .cache/
