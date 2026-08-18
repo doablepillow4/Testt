@@ -182,4 +182,36 @@ export const GetWalletProfileResponse = zod.object({
   "fetchedAt": zod.coerce.date()
 })
 
+export const getTokenCoordinatedWalletsPathMintMin = 32;
+export const GetTokenCoordinatedWalletsParams = zod.object({
+"mint": zod.coerce.string().min(getTokenCoordinatedWalletsPathMintMin)
+});
+export const GetTokenCoordinatedWalletsResponse = zod.object({
+"mint": zod.string(),
+"clusters": zod.array(zod.object({
+   "clusterId": zod.string(),
+   "wallets": zod.array(zod.object({
+     "wallet": zod.string(),
+     "buyVolume": zod.number(),
+     "sellVolume": zod.number(),
+     "firstSeen": zod.coerce.date().nullable(),
+     "lastSeen": zod.coerce.date().nullable(),
+     "supplyShare": zod.number()
+   })),
+   "confidence": zod.number(),
+   "reasons": zod.array(zod.string()),
+   "signals": zod.array(zod.object({
+     "type": zod.enum(['funding-source', 'same-tx', 'temporal', 'similar-size', 'sell-sync', 'co-occurrence']),
+     "strength": zod.number(),
+     "summary": zod.string()
+   })),
+   "activityStart": zod.coerce.date().nullable(),
+   "activityEnd": zod.coerce.date().nullable(),
+   "supplyShare": zod.number(),
+   "dataCompleteness": zod.enum(['complete', 'partial', 'unknown'])
+})),
+"scannedTransactions": zod.number(),
+"fetchedAt": zod.coerce.date(),
+"dataCompleteness": zod.enum(['complete', 'partial', 'unknown'])
+});
 

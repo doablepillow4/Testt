@@ -746,6 +746,433 @@ async function getBuyerBalances(mint: string, addresses: string[]) {
   return balances;
 }
 
+type CoordinatedSignalType = "same-tx" | "temporal" | "similar-size" | "funding-source" | "sell-sync" | "co-occurrence";
+
+type CoordinatedTradeEvent = {
+  wallet: string;
+  type: "BUY" | "SELL";
+  amountRaw: bigint;
+  timestamp: number | null;
+  signature: string;
+  fundingSource?: string | null;
+};
+
+type CoordinatedSignal = {
+  type: CoordinatedSignalType;
+  strength: number;
+  summary: string;
+};
+
+type CoordinatedWalletSummary = {
+  wallet: string;
+  buyVolume: number;
+  sellVolume: number;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  supplyShare: number;
+};
+
+type CoordinatedWalletCluster = {
+  clusterId: string;
+  wallets: CoordinatedWalletSummary[];
+  confidence: number;
+  reasons: string[];
+  signals: CoordinatedSignal[];
+  activityStart: string | null;
+  activityEnd: string | null;
+  supplyShare: number;
+  dataCompleteness: "complete" | "partial" | "unknown";
+};
+
+function isLikelyInfrastructureWallet(wallet: string): boolean {
+  const value = wallet.toLowerCase();
+  return /^(lp|router|dex|amm|vault|pool|treasury|market|program|jupiter|raydium|orca|phoenix|meteora|pumpswap|saber|serum|whirlpool|solana|system|spl-token|wrapped-sol)/.test(value)
+    || /(lp|router|dex|amm|vault|pool|treasury|market|program)/.test(value);
+}
+
+function inferFundingSource(transaction: TransactionResult, wallet: string): string | null {
+  const signerKeys = (transaction.transaction?.message?.accountKeys ?? [])
+    .filter((account) => account.signer && account.pubkey)
+    .map((account) => account.pubkey)
+    .filter((pubkey): pubkey is string => Boolean(pubkey));
+
+  if (signerKeys.length === 0) return null;
+  if (signerKeys.length === 1) return signerKeys[0];
+
+  const walletSigner = signerKeys.includes(wallet) ? wallet : null;
+  if (walletSigner) return walletSigner;
+
+  return signerKeys[0] ?? null;
+}
+
+function classifyCoordinatedTradeEvidence(
+  eventPair: { left: CoordinatedTradeEvent; right: CoordinatedTradeEvent },
+  isLikelyRouterTransaction: boolean,
+) {
+  const { left, right } = eventPair;
+  const timesGap = left.timestamp !== null && right.timestamp !== null
+    ? Math.abs(left.timestamp - right.timestamp)
+    : Number.POSITIVE_INFINITY;
+  const sameTx = left.signature === right.signature;
+  const temporalWindow = Number.isFinite(timesGap) && timesGap <= 180;
+
+  const tradeRatio = left.amountRaw === 0n || right.amountRaw === 0n
+    ? 0
+    : Number(
+        (left.amountRaw < right.amountRaw
+          ? (left.amountRaw * 10000n) / right.amountRaw
+          : (right.amountRaw * 10000n) / left.amountRaw)
+      ) / 100;
+
+  const similarSize = tradeRatio >= 0.9;
+  const sellSync = left.type === "SELL" && right.type === "SELL" && temporalWindow;
+  const sharedFunding = Boolean(
+    left.fundingSource &&
+    right.fundingSource &&
+    left.fundingSource === right.fundingSource &&
+    left.fundingSource !== "unknown",
+  );
+
+  return {
+    sameTx,
+    temporalWindow,
+    similarSize,
+    sellSync,
+    sharedFunding,
+    timesGap,
+    tradeRatio,
+    isLikelyRouterTransaction,
+  };
+}
+
+export function analyzeCoordinatedWallets({
+  tradeEvents,
+  totalSupplyRaw,
+  decimals,
+  walletBalances,
+}: {
+  tradeEvents: CoordinatedTradeEvent[];
+  totalSupplyRaw: bigint;
+  decimals: number;
+  walletBalances?: Map<string, bigint>;
+}): { clusters: CoordinatedWalletCluster[]; dataCompleteness: "complete" | "partial" | "unknown" } {
+  const filtered = tradeEvents
+    .filter((event) => (event.type === "BUY" || event.type === "SELL") && !isLikelyInfrastructureWallet(event.wallet));
+
+  if (filtered.length === 0) {
+    return { clusters: [], dataCompleteness: "unknown" };
+  }
+
+  const bySignature = new Map<string, CoordinatedTradeEvent[]>();
+  for (const event of filtered) {
+    const group = bySignature.get(event.signature) ?? [];
+    group.push(event);
+    bySignature.set(event.signature, group);
+  }
+
+  const pairEvidence = new Map<string, {
+    pair: [string, string];
+    sameTx: number;
+    temporal: number;
+    similarSize: number;
+    sellSync: number;
+    fundingSource: number;
+    coOccurrence: number;
+    reasons: Set<string>;
+    signals: Map<CoordinatedSignalType, number>;
+  }>();
+
+  for (const group of bySignature.values()) {
+    const wallets = [...new Set(group.map((event) => event.wallet))];
+    for (let leftIndex = 0; leftIndex < wallets.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < wallets.length; rightIndex += 1) {
+        const leftWallet = wallets[leftIndex];
+        const rightWallet = wallets[rightIndex];
+        const pairKey = [leftWallet, rightWallet].sort().join("|");
+        const existing = pairEvidence.get(pairKey) ?? {
+          pair: [leftWallet, rightWallet],
+          sameTx: 0,
+          temporal: 0,
+          similarSize: 0,
+          sellSync: 0,
+          fundingSource: 0,
+          coOccurrence: 0,
+          reasons: new Set<string>(),
+          signals: new Map<CoordinatedSignalType, number>(),
+        };
+
+        const left = group.find((event) => event.wallet === leftWallet) ?? null;
+        const right = group.find((event) => event.wallet === rightWallet) ?? null;
+        if (!left || !right) continue;
+
+        const evidence = classifyCoordinatedTradeEvidence({ left, right }, false);
+
+        existing.coOccurrence += 1;
+        existing.signals.set("co-occurrence", (existing.signals.get("co-occurrence") ?? 0) + 1);
+
+        if (evidence.sameTx) {
+          existing.sameTx += 1;
+          existing.signals.set("same-tx", (existing.signals.get("same-tx") ?? 0) + 1);
+          existing.reasons.add("The wallets appeared in the same transaction signature. This is only weak evidence unless confirmed by other independent signals.");
+        }
+
+        if (evidence.temporalWindow) {
+          existing.temporal += 1;
+          existing.signals.set("temporal", (existing.signals.get("temporal") ?? 0) + 1);
+          existing.reasons.add(`Both wallets traded within a short 180-second window (${evidence.timesGap}s gap).`);
+        }
+
+        if (evidence.similarSize) {
+          existing.similarSize += 1;
+          existing.signals.set("similar-size", (existing.signals.get("similar-size") ?? 0) + 1);
+          existing.reasons.add(`Their trade sizes were closely matched (about ${Number(evidence.tradeRatio * 100).toFixed(1)}% of each other).`);
+        }
+
+        if (evidence.sellSync) {
+          existing.sellSync += 1;
+          existing.signals.set("sell-sync", (existing.signals.get("sell-sync") ?? 0) + 1);
+          existing.reasons.add("Both wallets showed coordinated sell activity in near-unison, which can indicate synchronized exit behavior.");
+        }
+
+        if (evidence.sharedFunding) {
+          existing.fundingSource += 1;
+          existing.signals.set("funding-source", (existing.signals.get("funding-source") ?? 0) + 1);
+          existing.reasons.add("The same upstream funding source appears before both buys, which is stronger evidence of a shared route.");
+        }
+
+        pairEvidence.set(pairKey, existing);
+      }
+    }
+  }
+
+  const adjacency = new Map<string, Set<string>>();
+  for (const entry of pairEvidence.values()) {
+    const [leftWallet, rightWallet] = entry.pair;
+    const signalTypes = new Set(entry.signals.keys());
+    const independentSignals = [...signalTypes].filter((type) => type !== "co-occurrence");
+    const repeatedEvidence = entry.sameTx >= 2 || entry.temporal >= 2 || entry.similarSize >= 2 || entry.fundingSource >= 2 || entry.sellSync >= 2 || entry.coOccurrence >= 2;
+    const hasStrongSignal = independentSignals.includes("funding-source") || independentSignals.includes("sell-sync") || independentSignals.includes("similar-size");
+    const qualifies = independentSignals.length >= 2 && repeatedEvidence && hasStrongSignal;
+
+    if (!qualifies) continue;
+
+    if (!adjacency.has(leftWallet)) adjacency.set(leftWallet, new Set<string>());
+    if (!adjacency.has(rightWallet)) adjacency.set(rightWallet, new Set<string>());
+    adjacency.get(leftWallet)!.add(rightWallet);
+    adjacency.get(rightWallet)!.add(leftWallet);
+  }
+
+  const visited = new Set<string>();
+  const clusters: CoordinatedWalletCluster[] = [];
+  const holderMap = new Map<string, bigint>();
+  if (walletBalances) {
+    for (const [wallet, balance] of walletBalances.entries()) holderMap.set(wallet, balance);
+  }
+
+  for (const wallet of adjacency.keys()) {
+    if (visited.has(wallet)) continue;
+    const stack = [wallet];
+    const component = new Set<string>();
+    while (stack.length) {
+      const current = stack.pop()!;
+      if (visited.has(current) || component.has(current)) continue;
+      component.add(current);
+      visited.add(current);
+      for (const neighbor of adjacency.get(current) ?? []) {
+        if (!component.has(neighbor)) stack.push(neighbor);
+      }
+    }
+
+    if (component.size <= 1) continue;
+
+    const walletSummaries: CoordinatedWalletSummary[] = [];
+    const clusterSignals = new Map<CoordinatedSignalType, CoordinatedSignal>();
+    const clusterReasons = new Set<string>();
+    let clusterConfidence = 0;
+    let clusterPairs = 0;
+
+    for (const member of [...component]) {
+      const memberTrades = filtered.filter((event) => event.wallet === member);
+      const buyVolume = memberTrades.filter((event) => event.type === "BUY").reduce((sum, event) => sum + event.amountRaw, 0n);
+      const sellVolume = memberTrades.filter((event) => event.type === "SELL").reduce((sum, event) => sum + event.amountRaw, 0n);
+      const firstSeen = memberTrades
+        .map((event) => event.timestamp)
+        .filter((timestamp): timestamp is number => timestamp !== null)
+        .sort((left, right) => left - right)[0] ?? null;
+      const lastSeen = memberTrades
+        .map((event) => event.timestamp)
+        .filter((timestamp): timestamp is number => timestamp !== null)
+        .sort((left, right) => right - left)[0] ?? null;
+      const supplied = holderMap.get(member) ?? 0n;
+      const supplyShare = totalSupplyRaw > 0n
+        ? Number((supplied > 0n ? (supplied * 10000n) / totalSupplyRaw : 0n)) / 100
+        : 0;
+
+      walletSummaries.push({
+        wallet: member,
+        buyVolume: Number(toDisplayNumber(buyVolume, decimals)),
+        sellVolume: Number(toDisplayNumber(sellVolume, decimals)),
+        firstSeen: firstSeen ? new Date(firstSeen * 1000).toISOString() : null,
+        lastSeen: lastSeen ? new Date(lastSeen * 1000).toISOString() : null,
+        supplyShare,
+      });
+    }
+
+    for (const entry of pairEvidence.values()) {
+      const [leftWallet, rightWallet] = entry.pair;
+      if (!component.has(leftWallet) || !component.has(rightWallet)) continue;
+      clusterPairs += 1;
+      const signalEntries = Array.from(entry.signals.entries()).map(([type, strength]) => ({
+        type,
+        strength,
+        summary: type === "same-tx"
+          ? "Both wallets traded in the same transaction signature, but same-transaction activity alone is not proof of coordination."
+          : type === "temporal"
+            ? "Both wallets traded within a short time window."
+            : type === "similar-size"
+              ? "Their trade sizes were tightly matched."
+              : type === "sell-sync"
+                ? "Both wallets showed coordinated sell activity in near-unison."
+                : type === "funding-source"
+                  ? "The same upstream funding source appears before both buys."
+                  : "The wallets repeatedly appeared together across the same execution patterns.",
+      }));
+
+      for (const signal of signalEntries) {
+        const existing = clusterSignals.get(signal.type) ?? { type: signal.type, strength: 0, summary: signal.summary };
+        existing.strength += signal.strength;
+        clusterSignals.set(signal.type, existing);
+      }
+      for (const reason of entry.reasons) clusterReasons.add(reason);
+
+      clusterConfidence += Math.min(
+        0.9,
+        0.12
+          + (entry.sameTx * 0.08)
+          + (entry.temporal * 0.12)
+          + (entry.similarSize * 0.18)
+          + (entry.sellSync * 0.2)
+          + (entry.fundingSource * 0.22)
+          + (entry.coOccurrence * 0.04),
+      );
+    }
+
+    const signals = Array.from(clusterSignals.values())
+      .map((signal) => ({
+        type: signal.type,
+        strength: Math.min(1, Number(signal.strength) / Math.max(1, clusterPairs)),
+        summary: signal.summary,
+      }))
+      .sort((left, right) => right.strength - left.strength);
+
+    const evidenceTypes = new Set(signals.map((signal) => signal.type));
+    const qualifiesForCluster = signals.length > 0 && (
+      evidenceTypes.has("funding-source")
+      || evidenceTypes.has("sell-sync")
+      || (evidenceTypes.has("same-tx") && evidenceTypes.size >= 2)
+      || (evidenceTypes.size >= 2 && !evidenceTypes.has("co-occurrence"))
+    );
+
+    if (!qualifiesForCluster) continue;
+
+    const confidence = clusterPairs > 0 ? Math.min(0.9, clusterConfidence / clusterPairs) : 0.1;
+    const activityStart = walletSummaries
+      .map((wallet) => wallet.firstSeen)
+      .filter((value): value is string => Boolean(value))
+      .sort()[0] ?? null;
+    const activityEnd = walletSummaries
+      .map((wallet) => wallet.lastSeen)
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => right.localeCompare(left))[0] ?? null;
+    const supplyShare = walletSummaries.reduce((sum, wallet) => sum + wallet.supplyShare, 0);
+
+    clusters.push({
+      clusterId: `cluster-${clusters.length + 1}`,
+      wallets: walletSummaries,
+      confidence,
+      reasons: [...clusterReasons].slice(0, 6),
+      signals,
+      activityStart,
+      activityEnd,
+      supplyShare: Number((supplyShare * 100).toFixed(2)) / 100,
+      dataCompleteness: filtered.length < 8 ? "partial" : "complete",
+    });
+  }
+
+  return {
+    clusters: clusters.sort((left, right) => right.confidence - left.confidence),
+    dataCompleteness: filtered.length < 8 ? "partial" : "complete",
+  };
+}
+
+export async function getCoordinatedWallets(mint: string) {
+  const [signatures, holderSnapshot] = await Promise.all([
+    heliusRpc<SignatureInfo[]>("getSignaturesForAddress", [mint, { limit: 120 }]),
+    getHolders(mint),
+  ]);
+
+  const orderedSignatures = [...(signatures ?? [])].reverse().slice(0, 120);
+  const tradeEvents: CoordinatedTradeEvent[] = [];
+  const walletBalances = new Map<string, bigint>();
+
+  for (const holder of (holderSnapshot.holders as Array<{ address: string; amountRaw?: bigint | number }>) ?? []) {
+    const raw = typeof holder.amountRaw === "bigint" ? holder.amountRaw : BigInt(holder.amountRaw ?? 0);
+    walletBalances.set(holder.address, raw);
+  }
+
+  for (let index = 0; index < orderedSignatures.length; index += 10) {
+    const chunk = orderedSignatures.slice(index, index + 10);
+    const transactions = await Promise.all(
+      chunk.map(async (signature) => {
+        if (!signature.signature) return null;
+        const transaction = await heliusRpc<TransactionResult | null>("getTransaction", [
+          signature.signature,
+          { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
+        ]).catch(() => null);
+        return { signature: signature.signature, transaction };
+      }),
+    );
+
+    for (const item of transactions) {
+      if (!item?.transaction || !item.transaction.blockTime) continue;
+      const walletEvents = detectWalletEvents(item.transaction, mint)
+        .filter((event): event is WalletDeltaEvent & { type: "BUY" | "SELL" } => event.type === "BUY" || event.type === "SELL");
+
+      for (const event of walletEvents) {
+        tradeEvents.push({
+          wallet: event.wallet,
+          type: event.type,
+          amountRaw: event.amountRaw,
+          timestamp: event.timestamp,
+          signature: item.signature ?? event.signature,
+          fundingSource: inferFundingSource(item.transaction, event.wallet),
+        });
+      }
+    }
+  }
+
+  const totalSupplyRaw = (holderSnapshot.holders as Array<{ amountRaw?: bigint | number }> ?? []).reduce(
+    (sum, holder) => sum + (typeof holder.amountRaw === "bigint" ? holder.amountRaw : BigInt(holder.amountRaw ?? 0)),
+    0n,
+  );
+  const supply = Number(holderSnapshot.totalSupply ?? 0);
+  const decimals = holderSnapshot.decimals ?? 9;
+  const analysis = analyzeCoordinatedWallets({
+    tradeEvents,
+    totalSupplyRaw,
+    decimals,
+    walletBalances,
+  });
+
+  return {
+    mint,
+    clusters: analysis.clusters,
+    scannedTransactions: orderedSignatures.length,
+    fetchedAt: new Date().toISOString(),
+    dataCompleteness: analysis.dataCompleteness,
+  };
+}
+
 function formatElapsedTime(seconds: number) {
   const totalSeconds = Math.max(0, Math.round(seconds));
   if (totalSeconds < 60) return `+${totalSeconds}s`;

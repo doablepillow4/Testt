@@ -12,6 +12,7 @@ import {
   SearchTokensResponse,
 } from "@workspace/api-zod";
 import {
+  getCoordinatedWallets,
   getDexToken,
   getEarlyBuyers,
   getHolders,
@@ -85,6 +86,21 @@ router.get("/tokens/:mint/buyers", async (req, res): Promise<void> => {
   } catch (error) {
     logUpstreamError(req, error);
     res.status(502).json({ error: "Early buyer data is unavailable right now. Try again in a moment." });
+  }
+});
+
+router.get("/tokens/:mint/coordinated-wallets", async (req, res): Promise<void> => {
+  const parsed = GetTokenHoldersParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "That does not look like a valid Solana mint address." });
+    return;
+  }
+
+  try {
+    res.json(await getCoordinatedWallets(parsed.data.mint));
+  } catch (error) {
+    logUpstreamError(req, error);
+    res.status(502).json({ error: "Coordinated wallet intelligence is unavailable right now. Try again in a moment." });
   }
 });
 

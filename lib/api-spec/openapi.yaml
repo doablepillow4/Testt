@@ -95,6 +95,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EarlyBuyersResponse"
+  /tokens/{mint}/coordinated-wallets:
+    get:
+      operationId: getCoordinatedWallets
+      tags: [tokens]
+      summary: Detect likely coordinated wallet activity
+      parameters:
+        - $ref: "#/components/parameters/Mint"
+      responses:
+        "200":
+          description: Coordinated-wallet risk signal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoordinatedWalletsResponse"
   /wallets/{address}:
     get:
       operationId: getWalletProfile
@@ -241,6 +255,63 @@ components:
             $ref: "#/components/schemas/EarlyBuyer"
         scannedTransactions: { type: number }
         fetchedAt: { type: string, format: date-time }
+    CoordinatedWalletSignal:
+      type: object
+      required: [type, strength, summary]
+      properties:
+        type:
+          type: string
+          enum: [funding-source, same-tx, temporal, similar-size, sell-sync, co-occurrence]
+        strength: { type: number }
+        summary: { type: string }
+    CoordinatedWalletSummary:
+      type: object
+      required: [wallet, buyVolume, sellVolume, firstSeen, lastSeen, supplyShare]
+      properties:
+        wallet: { type: string }
+        buyVolume: { type: number }
+        sellVolume: { type: number }
+        firstSeen: { type: ["string", "null"], format: date-time }
+        lastSeen: { type: ["string", "null"], format: date-time }
+        supplyShare: { type: number }
+    CoordinatedWalletCluster:
+      type: object
+      required: [clusterId, wallets, confidence, reasons, signals, activityStart, activityEnd, supplyShare, dataCompleteness]
+      properties:
+        clusterId: { type: string }
+        wallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoordinatedWalletSummary"
+        confidence: { type: number }
+        reasons:
+          type: array
+          items:
+            type: string
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoordinatedWalletSignal"
+        activityStart: { type: ["string", "null"], format: date-time }
+        activityEnd: { type: ["string", "null"], format: date-time }
+        supplyShare: { type: number }
+        dataCompleteness:
+          type: string
+          enum: [complete, partial, unknown]
+    CoordinatedWalletsResponse:
+      type: object
+      required: [mint, clusters, scannedTransactions, fetchedAt, dataCompleteness]
+      properties:
+        mint: { type: string }
+        clusters:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoordinatedWalletCluster"
+        scannedTransactions: { type: number }
+        fetchedAt: { type: string, format: date-time }
+        dataCompleteness:
+          type: string
+          enum: [complete, partial, unknown]
     WalletAsset:
       type: object
       required: [id, name, symbol, amount, decimals]
